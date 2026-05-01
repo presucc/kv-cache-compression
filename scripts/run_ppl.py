@@ -17,8 +17,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--methods",
         nargs="+",
-        default=["dense", "sliding_window", "streamingllm", "asw_kv"],
-        choices=["dense", "sliding_window", "streamingllm", "asw_kv"],
+        default=["dense", "sliding_window", "streamingllm", "h2o", "snapkv", "asw_kv"],
+        choices=["dense", "sliding_window", "streamingllm", "h2o", "snapkv", "asw_kv"],
     )
     parser.add_argument("--window-size", type=int, default=256)
     parser.add_argument("--sink-size", type=int, default=4)

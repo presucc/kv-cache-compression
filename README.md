@@ -2,7 +2,8 @@
 
 This repository is the individual course-project implementation for efficient
 language model inference. It studies training-free KV cache compression on
-`EleutherAI/pythia-70m`.
+`EleutherAI/pythia-70m`, including several reproduced baselines and one
+proposed extension.
 
 The proposed method, **ASW-KV**, extends StreamingLLM by keeping a small
 attention-guided memory of useful middle-context tokens:
@@ -23,14 +24,21 @@ PPL experiments use 1024 tokens, `sink_size=4`, `window_size=256`, and
 | PG-19 | dense | 31.10 | 1023 | 512.00 |
 | PG-19 | sliding_window | 36.30 | 256 | 224.09 |
 | PG-19 | streamingllm | 31.43 | 260 | 227.09 |
+| PG-19 | h2o | 31.39 | 288 | 247.60 |
+| PG-19 | snapkv | 31.23 | 288 | 247.60 |
 | PG-19 | asw_kv | 31.23 | 292 | 250.47 |
 | Wikitext-2 | dense | 30.15 | 1023 | 512.00 |
 | Wikitext-2 | sliding_window | 42.95 | 256 | 224.09 |
 | Wikitext-2 | streamingllm | 36.19 | 260 | 227.09 |
+| Wikitext-2 | h2o | 35.51 | 288 | 247.60 |
+| Wikitext-2 | snapkv | 36.16 | 288 | 247.60 |
 | Wikitext-2 | asw_kv | 35.68 | 292 | 250.47 |
 
-ASW-KV improves over StreamingLLM on both datasets while keeping the maximum KV
-cache far below the dense baseline.
+The added baselines make the trade-off clearer: H2O-lite is strongest on
+Wikitext-2, SnapKV-lite is strongest on this PG-19 sample, and ASW-KV remains
+competitive while explicitly combining attention sinks, selected middle tokens,
+and the recent window. All compressed methods keep the maximum KV cache far
+below the dense baseline.
 
 ## Ablation
 
@@ -54,10 +62,12 @@ GPU latency was measured on an NVIDIA GeForce RTX 4080 Laptop GPU with a
 
 | Method | TTFT (s) | TPOT (ms) | Throughput (tok/s) | Peak memory (MB) |
 | --- | ---: | ---: | ---: | ---: |
-| dense | 8.89 | 17.51 | 6.40 | 165.62 |
-| sliding_window | 8.59 | 17.28 | 6.61 | 154.42 |
-| streamingllm | 8.96 | 17.25 | 6.37 | 154.56 |
-| asw_kv | 9.04 | 18.03 | 6.29 | 155.71 |
+| dense | 10.25 | 18.37 | 5.61 | 165.62 |
+| sliding_window | 9.88 | 18.22 | 5.81 | 154.42 |
+| streamingllm | 6.29 | 10.79 | 9.19 | 154.56 |
+| h2o | 5.76 | 10.37 | 9.98 | 155.58 |
+| snapkv | 5.29 | 10.53 | 10.76 | 155.57 |
+| asw_kv | 5.12 | 10.58 | 11.06 | 155.71 |
 
 The implementation uses a clear one-token-at-a-time Python decoding loop, so
 these numbers should be read as reproducible policy comparisons rather than an
@@ -68,12 +78,16 @@ optimized serving benchmark.
 - `dense`: keep the full KV cache.
 - `sliding_window`: keep only the most recent tokens.
 - `streamingllm`: keep attention sink tokens plus the recent window.
+- `h2o`: keep cumulative attention heavy hitters plus the recent window.
+- `snapkv`: keep current-attention-selected middle tokens plus the recent
+  window.
 - `asw_kv`: keep attention sink tokens, attention-selected middle tokens, and
   the recent window.
 
-For ASW-KV, middle-token importance is computed from the average attention paid
-by the current query to retained historical tokens. The top
-`important_size` middle tokens are kept.
+For `h2o`, token importance is the cumulative attention mass received over
+time. For `snapkv` and `asw_kv`, middle-token importance is computed from the
+average attention paid by the current query to retained historical tokens. The
+top `important_size` eligible tokens are kept.
 
 ## Setup
 
@@ -164,11 +178,11 @@ python scripts\run_ppl.py `
   --model EleutherAI/pythia-70m `
   --text-file data/pg19_raw/test/10146.txt `
   --max-tokens 1024 `
-  --methods dense sliding_window streamingllm asw_kv `
+  --methods dense sliding_window streamingllm h2o snapkv asw_kv `
   --window-size 256 `
   --sink-size 4 `
   --important-size 32 `
-  --output results/ppl_pg19_1024.json
+  --output results/ppl_pg19_1024_extended.json
 ```
 
 Wikitext-2 PPL:
@@ -178,11 +192,11 @@ python scripts\run_ppl.py `
   --model EleutherAI/pythia-70m `
   --text-file data/wikitext_validation.txt `
   --max-tokens 1024 `
-  --methods dense sliding_window streamingllm asw_kv `
+  --methods dense sliding_window streamingllm h2o snapkv asw_kv `
   --window-size 256 `
   --sink-size 4 `
   --important-size 32 `
-  --output results/ppl_wikitext_1024.json
+  --output results/ppl_wikitext_1024_extended.json
 ```
 
 GPU latency:
@@ -193,13 +207,13 @@ python scripts\run_latency.py `
   --text-file data/pg19_raw/test/10146.txt `
   --max-prompt-tokens 512 `
   --max-new-tokens 64 `
-  --methods dense sliding_window streamingllm asw_kv `
+  --methods dense sliding_window streamingllm h2o snapkv asw_kv `
   --window-size 256 `
   --sink-size 4 `
   --important-size 32 `
   --device cuda `
   --dtype float16 `
-  --output results/latency_pg19_gpu_512_64.json
+  --output results/latency_pg19_gpu_512_64_extended.json
 ```
 
 ASW-KV ablation:
@@ -249,6 +263,8 @@ REPORT.md
 ## References
 
 - StreamingLLM: Efficient Streaming Language Models with Attention Sinks.
+- H2O: Heavy-Hitter Oracle for Efficient Generative Inference of Large
+  Language Models.
 - SnapKV: LLM Knows What You are Looking for Before Generation.
 - PyramidKV: Dynamic KV Cache Compression based on Pyramidal Information
   Funneling.

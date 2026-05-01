@@ -6,7 +6,7 @@ from typing import Iterable, Optional
 import torch
 
 
-SUPPORTED_METHODS = {"dense", "sliding_window", "streamingllm", "asw_kv"}
+SUPPORTED_METHODS = {"dense", "sliding_window", "streamingllm", "h2o", "snapkv", "asw_kv"}
 
 
 @dataclass(frozen=True)
@@ -26,7 +26,7 @@ class CachePolicyConfig:
 
     @property
     def needs_attention(self) -> bool:
-        return self.method == "asw_kv"
+        return self.method in {"h2o", "snapkv", "asw_kv"}
 
     @property
     def nominal_budget(self) -> Optional[int]:
@@ -36,6 +36,8 @@ class CachePolicyConfig:
             return self.window_size
         if self.method == "streamingllm":
             return self.sink_size + self.window_size
+        if self.method in {"h2o", "snapkv"}:
+            return self.important_size + self.window_size
         return self.sink_size + self.important_size + self.window_size
 
 
@@ -115,7 +117,12 @@ def select_keep_indices(
     if config.method == "streamingllm":
         return _unique_sorted([*sink, *recent])
 
-    protected = set(sink) | set(recent)
+    if config.method in {"h2o", "snapkv"}:
+        recent_start = max(0, length - config.window_size)
+        protected = set(range(recent_start, length))
+    else:
+        protected = set(sink) | set(recent)
+
     middle = [idx for idx in range(length) if idx not in protected]
     if not middle or config.important_size == 0:
         return _unique_sorted([*protected])
@@ -160,6 +167,7 @@ class KVCacheRuntime:
     def reset(self) -> None:
         self.past_key_values = None
         self.cache_positions: list[int] = []
+        self.importance_scores: Optional[torch.Tensor] = None
         self.total_seen = 0
         self.retained_history: list[int] = []
         self.max_retained_tokens = 0
@@ -198,11 +206,34 @@ class KVCacheRuntime:
         full_cache = as_legacy_cache(outputs.past_key_values)
         new_positions = [*self.cache_positions, self.total_seen]
         importance = summarize_attention_importance(outputs.attentions) if self.config.needs_attention else None
-        keep_indices = select_keep_indices(self.config, new_positions, importance)
+
+        selection_importance = importance
+        cumulative_importance = None
+        if self.config.method == "h2o":
+            if importance is not None and importance.numel() == len(new_positions):
+                previous = self.importance_scores
+                if previous is None or previous.numel() != cache_len:
+                    previous = torch.zeros(cache_len, dtype=importance.dtype, device=importance.device)
+                else:
+                    previous = previous.to(device=importance.device, dtype=importance.dtype)
+                cumulative_importance = torch.cat(
+                    [previous, torch.zeros(1, dtype=importance.dtype, device=importance.device)]
+                )
+                cumulative_importance = cumulative_importance + importance
+                selection_importance = cumulative_importance
+            else:
+                selection_importance = None
+
+        keep_indices = select_keep_indices(self.config, new_positions, selection_importance)
 
         pruned_cache = prune_legacy_cache(full_cache, keep_indices)
         self.past_key_values = to_model_cache(pruned_cache)
         self.cache_positions = [new_positions[idx] for idx in keep_indices]
+        if self.config.method == "h2o" and cumulative_importance is not None:
+            index = torch.tensor(keep_indices, device=cumulative_importance.device, dtype=torch.long)
+            self.importance_scores = cumulative_importance.index_select(0, index).detach()
+        else:
+            self.importance_scores = None
         self.total_seen += 1
 
         retained = len(self.cache_positions)

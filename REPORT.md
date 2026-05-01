@@ -11,6 +11,8 @@ preserving language modeling quality and measuring inference latency.
 - `dense`: full KV cache, used as the quality baseline.
 - `sliding_window`: keeps only recent tokens.
 - `streamingllm`: keeps attention sink tokens plus recent tokens.
+- `h2o`: keeps cumulative attention heavy hitters plus recent tokens.
+- `snapkv`: keeps current-attention-selected middle tokens plus recent tokens.
 - `asw_kv`: keeps attention sink tokens, attention-selected middle tokens, and
   recent tokens.
 
@@ -48,10 +50,14 @@ The method does not train or modify model parameters.
 | Wikitext-2 | dense | 30.15 | 1023 | 512.00 |
 | Wikitext-2 | sliding_window | 42.95 | 256 | 224.09 |
 | Wikitext-2 | streamingllm | 36.19 | 260 | 227.09 |
+| Wikitext-2 | h2o | 35.51 | 288 | 247.60 |
+| Wikitext-2 | snapkv | 36.16 | 288 | 247.60 |
 | Wikitext-2 | asw_kv | 35.68 | 292 | 250.47 |
 | PG-19 | dense | 31.10 | 1023 | 512.00 |
 | PG-19 | sliding_window | 36.30 | 256 | 224.09 |
 | PG-19 | streamingllm | 31.43 | 260 | 227.09 |
+| PG-19 | h2o | 31.39 | 288 | 247.60 |
+| PG-19 | snapkv | 31.23 | 288 | 247.60 |
 | PG-19 | asw_kv | 31.23 | 292 | 250.47 |
 
 ## Latency results
@@ -63,10 +69,12 @@ rather than an optimized serving benchmark.
 
 | Method | TTFT (s) | TPOT (ms) | Throughput (tok/s) | Peak memory (MB) |
 | --- | ---: | ---: | ---: | ---: |
-| dense | 8.89 | 17.51 | 6.40 | 165.62 |
-| sliding_window | 8.59 | 17.28 | 6.61 | 154.42 |
-| streamingllm | 8.96 | 17.25 | 6.37 | 154.56 |
-| asw_kv | 9.04 | 18.03 | 6.29 | 155.71 |
+| dense | 10.25 | 18.37 | 5.61 | 165.62 |
+| sliding_window | 9.88 | 18.22 | 5.81 | 154.42 |
+| streamingllm | 6.29 | 10.79 | 9.19 | 154.56 |
+| h2o | 5.76 | 10.37 | 9.98 | 155.58 |
+| snapkv | 5.29 | 10.53 | 10.76 | 155.57 |
+| asw_kv | 5.12 | 10.58 | 11.06 | 155.71 |
 
 ## Discussion
 
@@ -75,10 +83,18 @@ PPL drops from 36.30 with `sliding_window` to 31.43 with `streamingllm`, nearly
 recovering the dense-cache result of 31.10. On Wikitext-2, `streamingllm` also
 improves over `sliding_window`, reducing PPL from 42.95 to 36.19.
 
+The two additional reproduced methods give useful reference points. H2O-lite
+uses cumulative attention scores and is strongest on Wikitext-2, reducing PPL
+from 36.19 with `streamingllm` to 35.51. SnapKV-lite uses the current query's
+attention scores and is strongest on the tested PG-19 sample, reaching 31.23
+PPL with a 288-token nominal budget.
+
 ASW-KV improves the PPL/cache-size trade-off compared with StreamingLLM in both
 1024-token experiments. On PG-19, ASW-KV reduces PPL from 31.43 to 31.23 while
 still keeping the maximum retained cache far below dense cache size
 (292 vs. 1023 tokens). On Wikitext-2, ASW-KV reduces PPL from 36.19 to 35.68.
+Compared with SnapKV-lite, ASW-KV adds four attention sink tokens; compared
+with H2O-lite, it uses instant attention rather than cumulative attention.
 
 ASW-KV uses attention scores, so its quality gain should be weighed against the
 cost of requesting attention weights. The current implementation favors clarity
@@ -86,9 +102,9 @@ and reproducibility; an optimized version could update importance scores less
 frequently or reuse cached importance statistics.
 
 On the GPU latency smoke benchmark, compressed-cache methods reduce peak memory
-relative to dense cache. ASW-KV is slightly slower than StreamingLLM because it
-requests and aggregates attention scores, but it also improves PPL in both
-datasets.
+relative to dense cache. The latency script is intentionally simple, so the
+absolute timings can vary between runs, but the compressed methods consistently
+retain fewer KV tokens and lower peak CUDA memory than dense cache.
 
 ## Ablation: middle-token memory size
 
