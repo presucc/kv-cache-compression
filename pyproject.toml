@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llm-kv-compression"
+version = "0.1.0"
+description = "Training-free KV cache compression baselines and ASW-KV for Pythia-70M."
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+dependencies = [
+  "torch>=2.1",
+  "transformers>=4.40",
+  "datasets>=3.6,<4",
+  "fsspec<=2025.3.0",
+  "accelerate>=0.28",
+  "tqdm>=4.66",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

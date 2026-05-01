@@ -1,0 +1,254 @@
+# ASW-KV: Adaptive Sink-Window KV Cache Compression
+
+This repository is the individual course-project implementation for efficient
+language model inference. It studies training-free KV cache compression on
+`EleutherAI/pythia-70m`.
+
+The proposed method, **ASW-KV**, extends StreamingLLM by keeping a small
+attention-guided memory of useful middle-context tokens:
+
+```text
+[attention sink tokens] + [important middle tokens] + [recent window]
+```
+
+All methods are inference-time only. No model parameters are trained or changed.
+
+## Main Results
+
+PPL experiments use 1024 tokens, `sink_size=4`, `window_size=256`, and
+`important_size=32`.
+
+| Dataset | Method | PPL | Max KV tokens | Avg KV tokens |
+| --- | --- | ---: | ---: | ---: |
+| PG-19 | dense | 31.10 | 1023 | 512.00 |
+| PG-19 | sliding_window | 36.30 | 256 | 224.09 |
+| PG-19 | streamingllm | 31.43 | 260 | 227.09 |
+| PG-19 | asw_kv | 31.23 | 292 | 250.47 |
+| Wikitext-2 | dense | 30.15 | 1023 | 512.00 |
+| Wikitext-2 | sliding_window | 42.95 | 256 | 224.09 |
+| Wikitext-2 | streamingllm | 36.19 | 260 | 227.09 |
+| Wikitext-2 | asw_kv | 35.68 | 292 | 250.47 |
+
+ASW-KV improves over StreamingLLM on both datasets while keeping the maximum KV
+cache far below the dense baseline.
+
+## Ablation
+
+PG-19 ablation with 1024 tokens, `sink_size=4`, and `window_size=256`:
+
+| important_size | PPL | Max KV tokens | Avg KV tokens |
+| ---: | ---: | ---: | ---: |
+| 0 | 31.43 | 260 | 227.09 |
+| 16 | 31.39 | 276 | 238.90 |
+| 32 | 31.23 | 292 | 250.47 |
+| 64 | 31.15 | 324 | 272.85 |
+
+The monotonic PPL decrease supports the main ASW-KV hypothesis: retaining a
+small number of attention-selected middle tokens recovers useful context beyond
+the sink-plus-window cache.
+
+## Latency
+
+GPU latency was measured on an NVIDIA GeForce RTX 4080 Laptop GPU with a
+512-token PG-19 prompt and 64 generated tokens.
+
+| Method | TTFT (s) | TPOT (ms) | Throughput (tok/s) | Peak memory (MB) |
+| --- | ---: | ---: | ---: | ---: |
+| dense | 8.89 | 17.51 | 6.40 | 165.62 |
+| sliding_window | 8.59 | 17.28 | 6.61 | 154.42 |
+| streamingllm | 8.96 | 17.25 | 6.37 | 154.56 |
+| asw_kv | 9.04 | 18.03 | 6.29 | 155.71 |
+
+The implementation uses a clear one-token-at-a-time Python decoding loop, so
+these numbers should be read as reproducible policy comparisons rather than an
+optimized serving benchmark.
+
+## Methods
+
+- `dense`: keep the full KV cache.
+- `sliding_window`: keep only the most recent tokens.
+- `streamingllm`: keep attention sink tokens plus the recent window.
+- `asw_kv`: keep attention sink tokens, attention-selected middle tokens, and
+  the recent window.
+
+For ASW-KV, middle-token importance is computed from the average attention paid
+by the current query to retained historical tokens. The top
+`important_size` middle tokens are kept.
+
+## Setup
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -U pip
+pip install -e .
+```
+
+On Windows PowerShell:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -U pip
+python -m pip install -e .
+```
+
+The experiments in `REPORT.md` were run with:
+
+```text
+torch 2.11.0+cu128
+transformers 4.57.1
+datasets 3.6.0
+EleutherAI/pythia-70m
+```
+
+If Hugging Face access is slow, set:
+
+```powershell
+$env:HF_ENDPOINT = "https://hf-mirror.com"
+```
+
+## Data
+
+Wikitext-2 can be loaded through Hugging Face Datasets:
+
+```powershell
+python scripts\run_ppl.py --dataset wikitext --split validation
+```
+
+The checked experiments use a local text export. If needed, create it from the
+cached Arrow file with:
+
+```powershell
+python scripts\export_wikitext_text.py `
+  --arrow-file C:\Users\<you>\.cache\huggingface\datasets\wikitext\wikitext-2-raw-v1\0.0.0\<hash>\wikitext-validation.arrow `
+  --output data/wikitext_validation.txt
+```
+
+For PG-19, the assignment allows testing on a single long sample. This repo's
+commands use:
+
+```text
+data/pg19_raw/test/10146.txt
+```
+
+Full PG-19 raw files can be downloaded with:
+
+```powershell
+python scripts\download_pg19_raw.py `
+  --hf-endpoint https://hf-mirror.com `
+  --output-dir data/pg19_raw `
+  --splits train validation test `
+  --workers 8 `
+  --retries 10 `
+  --timeout 90
+```
+
+Large data files are ignored by Git.
+Small JSON result files under `results/` are kept as reproducibility evidence.
+
+## Reproduce Experiments
+
+Run the full experiment suite on Windows:
+
+```powershell
+.\scripts\run_all_experiments.ps1
+```
+
+Or run individual commands.
+
+PG-19 PPL:
+
+```powershell
+python scripts\run_ppl.py `
+  --model EleutherAI/pythia-70m `
+  --text-file data/pg19_raw/test/10146.txt `
+  --max-tokens 1024 `
+  --methods dense sliding_window streamingllm asw_kv `
+  --window-size 256 `
+  --sink-size 4 `
+  --important-size 32 `
+  --output results/ppl_pg19_1024.json
+```
+
+Wikitext-2 PPL:
+
+```powershell
+python scripts\run_ppl.py `
+  --model EleutherAI/pythia-70m `
+  --text-file data/wikitext_validation.txt `
+  --max-tokens 1024 `
+  --methods dense sliding_window streamingllm asw_kv `
+  --window-size 256 `
+  --sink-size 4 `
+  --important-size 32 `
+  --output results/ppl_wikitext_1024.json
+```
+
+GPU latency:
+
+```powershell
+python scripts\run_latency.py `
+  --model EleutherAI/pythia-70m `
+  --text-file data/pg19_raw/test/10146.txt `
+  --max-prompt-tokens 512 `
+  --max-new-tokens 64 `
+  --methods dense sliding_window streamingllm asw_kv `
+  --window-size 256 `
+  --sink-size 4 `
+  --important-size 32 `
+  --device cuda `
+  --dtype float16 `
+  --output results/latency_pg19_gpu_512_64.json
+```
+
+ASW-KV ablation:
+
+```powershell
+foreach ($k in 0,16,32,64) {
+  python scripts\run_ppl.py `
+    --model EleutherAI/pythia-70m `
+    --text-file data/pg19_raw/test/10146.txt `
+    --max-tokens 1024 `
+    --methods asw_kv `
+    --window-size 256 `
+    --sink-size 4 `
+    --important-size $k `
+    --output "results/ablation_pg19_asw_important_$k.json"
+}
+```
+
+## Repository Structure
+
+```text
+src/llm_kv_compression/
+  cache.py          KV cache retention policies and runtime wrapper
+  evaluation.py     PPL and latency evaluation logic
+  modeling.py       model/tokenizer loading helpers
+  data.py           dataset/text loading helpers
+scripts/
+  run_ppl.py
+  run_latency.py
+  download_pg19_raw.py
+  summarize_results.py
+  run_all_experiments.ps1
+tests/
+  test_cache.py
+REPORT.md
+```
+
+## Notes
+
+- ASW-KV requests attention weights, which adds overhead. The method is meant
+  to study quality/cache trade-offs; a production implementation should update
+  importance scores less frequently or fuse the bookkeeping.
+- The latency script is intentionally simple and reproducible. It is not a
+  substitute for optimized serving systems such as vLLM or TensorRT-LLM.
+- `torchvision` and `torchaudio` are not required for this text-only project.
+
+## References
+
+- StreamingLLM: Efficient Streaming Language Models with Attention Sinks.
+- SnapKV: LLM Knows What You are Looking for Before Generation.
+- PyramidKV: Dynamic KV Cache Compression based on Pyramidal Information
+  Funneling.

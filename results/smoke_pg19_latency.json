@@ -1,0 +1,58 @@
+[
+  {
+    "method": "dense",
+    "prompt_tokens": 64,
+    "generated_tokens": 8,
+    "ttft_seconds": 1.3006523999938508,
+    "tpot_seconds": 0.021674928571363643,
+    "throughput_tokens_per_second": 5.508212090151237,
+    "end_to_end_tokens_per_second": 5.508212090151237,
+    "max_retained_tokens": 71,
+    "average_retained_tokens": 36.0,
+    "nominal_budget": null,
+    "peak_cuda_memory_mb": null,
+    "generated_text": "IONEER DAYS IN ST."
+  },
+  {
+    "method": "sliding_window",
+    "prompt_tokens": 64,
+    "generated_tokens": 8,
+    "ttft_seconds": 1.3247035999957006,
+    "tpot_seconds": 0.0215542285711438,
+    "throughput_tokens_per_second": 5.421585173939441,
+    "end_to_end_tokens_per_second": 5.421585173939441,
+    "max_retained_tokens": 64,
+    "average_retained_tokens": 35.605633802816904,
+    "nominal_budget": 64,
+    "peak_cuda_memory_mb": null,
+    "generated_text": "IONEER DAYS IN ST."
+  },
+  {
+    "method": "streamingllm",
+    "prompt_tokens": 64,
+    "generated_tokens": 8,
+    "ttft_seconds": 1.32147170000826,
+    "tpot_seconds": 0.021651014284413708,
+    "throughput_tokens_per_second": 5.4309868211704915,
+    "end_to_end_tokens_per_second": 5.4309868211704915,
+    "max_retained_tokens": 68,
+    "average_retained_tokens": 35.91549295774648,
+    "nominal_budget": 68,
+    "peak_cuda_memory_mb": null,
+    "generated_text": "IONEER DAYS IN ST."
+  },
+  {
+    "method": "asw_kv",
+    "prompt_tokens": 64,
+    "generated_tokens": 8,
+    "ttft_seconds": 1.3699092000024393,
+    "tpot_seconds": 0.02237230000069498,
+    "throughput_tokens_per_second": 5.240694279292007,
+    "end_to_end_tokens_per_second": 5.240694279292007,
+    "max_retained_tokens": 71,
+    "average_retained_tokens": 36.0,
+    "nominal_budget": 76,
+    "peak_cuda_memory_mb": null,
+    "generated_text": "IONEER DAYS IN ST."
+  }
+]

@@ -1,0 +1,11 @@
+[
+  {
+    "method": "asw_kv",
+    "tokens": 1024,
+    "nll": 3.4414992332458496,
+    "ppl": 31.23374975982267,
+    "max_retained_tokens": 292,
+    "average_retained_tokens": 250.4692082111437,
+    "nominal_budget": 292
+  }
+]

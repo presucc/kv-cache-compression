@@ -1,0 +1,58 @@
+[
+  {
+    "method": "dense",
+    "prompt_tokens": 512,
+    "generated_tokens": 64,
+    "ttft_seconds": 8.8942063000286,
+    "tpot_seconds": 0.017508476190010294,
+    "throughput_tokens_per_second": 6.4017666955554535,
+    "end_to_end_tokens_per_second": 6.4017666955554535,
+    "max_retained_tokens": 575,
+    "average_retained_tokens": 288.0,
+    "nominal_budget": null,
+    "peak_cuda_memory_mb": 165.6201171875,
+    "generated_text": ""
+  },
+  {
+    "method": "sliding_window",
+    "prompt_tokens": 512,
+    "generated_tokens": 64,
+    "ttft_seconds": 8.591658799967263,
+    "tpot_seconds": 0.01728425873073912,
+    "throughput_tokens_per_second": 6.611182933691426,
+    "end_to_end_tokens_per_second": 6.611182933691426,
+    "max_retained_tokens": 256,
+    "average_retained_tokens": 199.23478260869564,
+    "nominal_budget": 256,
+    "peak_cuda_memory_mb": 154.4150390625,
+    "generated_text": ""
+  },
+  {
+    "method": "streamingllm",
+    "prompt_tokens": 512,
+    "generated_tokens": 64,
+    "ttft_seconds": 8.96323900000425,
+    "tpot_seconds": 0.01725489047581389,
+    "throughput_tokens_per_second": 6.367970952831237,
+    "end_to_end_tokens_per_second": 6.367970952831237,
+    "max_retained_tokens": 260,
+    "average_retained_tokens": 201.44347826086957,
+    "nominal_budget": 260,
+    "peak_cuda_memory_mb": 154.5556640625,
+    "generated_text": ""
+  },
+  {
+    "method": "asw_kv",
+    "prompt_tokens": 512,
+    "generated_tokens": 64,
+    "ttft_seconds": 9.040649300033692,
+    "tpot_seconds": 0.01803300158760052,
+    "throughput_tokens_per_second": 6.288858018424632,
+    "end_to_end_tokens_per_second": 6.288858018424632,
+    "max_retained_tokens": 292,
+    "average_retained_tokens": 218.1113043478261,
+    "nominal_budget": 292,
+    "peak_cuda_memory_mb": 155.71142578125,
+    "generated_text": ""
+  }
+]

@@ -1,0 +1,38 @@
+[
+  {
+    "method": "dense",
+    "tokens": 128,
+    "nll": 3.494025707244873,
+    "ppl": 32.91820036006556,
+    "max_retained_tokens": 127,
+    "average_retained_tokens": 64.0,
+    "nominal_budget": null
+  },
+  {
+    "method": "sliding_window",
+    "tokens": 128,
+    "nll": 3.8684873580932617,
+    "ppl": 47.86992123901976,
+    "max_retained_tokens": 64,
+    "average_retained_tokens": 48.125984251968504,
+    "nominal_budget": 64
+  },
+  {
+    "method": "streamingllm",
+    "tokens": 128,
+    "nll": 3.5236096382141113,
+    "ppl": 33.906598389840376,
+    "max_retained_tokens": 68,
+    "average_retained_tokens": 50.06299212598425,
+    "nominal_budget": 68
+  },
+  {
+    "method": "asw_kv",
+    "tokens": 128,
+    "nll": 3.5092933177948,
+    "ppl": 33.42463883836827,
+    "max_retained_tokens": 76,
+    "average_retained_tokens": 53.55905511811024,
+    "nominal_budget": 76
+  }
+]
