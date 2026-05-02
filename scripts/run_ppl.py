@@ -18,6 +18,8 @@ METHOD_CHOICES = [
     "asw_kv",
 ]
 
+DEFAULT_METHODS = [method for method in METHOD_CHOICES if method != "lm_infinite"]
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate PPL under KV cache compression policies.")
@@ -31,7 +33,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--methods",
         nargs="+",
-        default=METHOD_CHOICES,
+        default=DEFAULT_METHODS,
         choices=METHOD_CHOICES,
     )
     parser.add_argument("--window-size", type=int, default=256)

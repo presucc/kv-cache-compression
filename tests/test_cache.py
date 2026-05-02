@@ -17,55 +17,56 @@ from llm_kv_compression.cache import (
 
 def test_streamingllm_keeps_sink_and_recent_tokens():
     config = CachePolicyConfig(method="streamingllm", sink_size=2, window_size=3)
-    keep = select_keep_indices(config, list(range(10)))
+    keep = select_keep_indices(config, 10)
     assert keep == [0, 1, 7, 8, 9]
 
 
 def test_lm_infinite_uses_initial_tokens_and_local_window():
     config = CachePolicyConfig(method="lm_infinite", sink_size=2, window_size=3)
-    keep = select_keep_indices(config, list(range(10)))
+    keep = select_keep_indices(config, 10)
     assert keep == [0, 1, 7, 8, 9]
 
 
 def test_asw_kv_keeps_attention_selected_middle_tokens():
     config = CachePolicyConfig(method="asw_kv", sink_size=2, window_size=2, important_size=2)
     importance = torch.tensor([0.0, 0.0, 0.1, 0.9, 0.2, 0.8, 0.0, 0.0])
-    keep = select_keep_indices(config, list(range(8)), importance)
+    keep = select_keep_indices(config, 8, importance)
     assert keep == [0, 1, 3, 5, 6, 7]
 
 
 def test_snapkv_keeps_important_tokens_and_recent_window_without_sink():
     config = CachePolicyConfig(method="snapkv", window_size=2, important_size=2)
     importance = torch.tensor([0.1, 0.9, 0.2, 0.8, 0.3, 0.4, 0.0, 0.0])
-    keep = select_keep_indices(config, list(range(8)), importance)
+    keep = select_keep_indices(config, 8, importance)
     assert keep == [1, 3, 6, 7]
 
 
 def test_h2o_uses_supplied_heavy_hitter_scores():
     config = CachePolicyConfig(method="h2o", window_size=2, important_size=2)
     cumulative_importance = torch.tensor([0.1, 0.2, 0.95, 0.3, 0.85, 0.4, 0.0, 0.0])
-    keep = select_keep_indices(config, list(range(8)), cumulative_importance)
+    keep = select_keep_indices(config, 8, cumulative_importance)
     assert keep == [2, 4, 6, 7]
 
 
 def test_scissorhands_keeps_persistent_important_tokens():
     config = CachePolicyConfig(method="scissorhands", window_size=2, important_size=2)
     persistent_scores = torch.tensor([0.1, 0.2, 0.95, 0.3, 0.85, 0.4, 0.0, 0.0])
-    keep = select_keep_indices(config, list(range(8)), persistent_scores)
+    keep = select_keep_indices(config, 8, persistent_scores)
     assert keep == [2, 4, 6, 7]
 
 
 def test_tova_keeps_current_token_and_top_attention_tokens():
     config = CachePolicyConfig(method="tova", window_size=2, important_size=2)
     importance = torch.tensor([0.1, 0.9, 0.2, 0.8, 0.3, 0.7, 0.0, 0.0])
-    keep = select_keep_indices(config, list(range(8)), importance)
-    assert keep == [1, 3, 5, 7]
+    keep = select_keep_indices(config, 8, importance)
+    assert keep == [1, 3, 7]
+    assert config.nominal_budget == 3
 
 
 def test_pyramidkv_keeps_sink_weighted_middle_and_recent_tokens():
     config = CachePolicyConfig(method="pyramidkv", sink_size=2, window_size=2, important_size=2)
     importance = torch.tensor([0.0, 0.0, 0.1, 0.9, 0.2, 0.8, 0.0, 0.0])
-    keep = select_keep_indices(config, list(range(8)), importance)
+    keep = select_keep_indices(config, 8, importance)
     assert keep == [0, 1, 3, 5, 6, 7]
 
 

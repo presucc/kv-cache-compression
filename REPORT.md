@@ -11,11 +11,14 @@ preserving language modeling quality and measuring inference latency.
 - `dense`: full KV cache, used as the quality baseline.
 - `sliding_window`: keeps only recent tokens.
 - `streamingllm`: keeps attention sink tokens plus recent tokens.
-- `lm_infinite`: keeps initial tokens plus recent tokens.
+- `lm_infinite`: implemented as initial tokens plus recent tokens. It matches
+  the StreamingLLM layout in this lightweight framework, so it is treated as an
+  alias rather than an independent benchmark row.
 - `h2o`: keeps cumulative attention heavy hitters plus recent tokens.
 - `scissorhands`: keeps tokens with persistent high attention plus recent
   tokens.
-- `tova`: keeps the current token and highest-attended historical tokens.
+- `tova`: keeps the current token and `important_size` highest-attended
+  historical tokens.
 - `snapkv`: keeps current-attention-selected middle tokens plus recent tokens.
 - `pyramidkv`: keeps sink, recent, and layer-weighted attention-selected
   middle tokens.
@@ -56,20 +59,18 @@ The method does not train or modify model parameters.
 | Wikitext-2 | dense | 30.15 | 1023 | 512.00 |
 | Wikitext-2 | sliding_window | 42.95 | 256 | 224.09 |
 | Wikitext-2 | streamingllm | 36.19 | 260 | 227.09 |
-| Wikitext-2 | lm_infinite | 36.19 | 260 | 227.09 |
 | Wikitext-2 | h2o | 35.51 | 288 | 247.60 |
 | Wikitext-2 | scissorhands | 36.44 | 288 | 247.60 |
-| Wikitext-2 | tova | 37.36 | 288 | 247.60 |
+| Wikitext-2 | tova | 65.50 | 33 | 32.48 |
 | Wikitext-2 | snapkv | 36.16 | 288 | 247.60 |
 | Wikitext-2 | pyramidkv | 35.58 | 292 | 250.47 |
 | Wikitext-2 | asw_kv | 35.68 | 292 | 250.47 |
 | PG-19 | dense | 31.10 | 1023 | 512.00 |
 | PG-19 | sliding_window | 36.30 | 256 | 224.09 |
 | PG-19 | streamingllm | 31.43 | 260 | 227.09 |
-| PG-19 | lm_infinite | 31.43 | 260 | 227.09 |
 | PG-19 | h2o | 31.39 | 288 | 247.60 |
 | PG-19 | scissorhands | 31.43 | 288 | 247.60 |
-| PG-19 | tova | 31.37 | 288 | 247.60 |
+| PG-19 | tova | 44.91 | 33 | 32.48 |
 | PG-19 | snapkv | 31.23 | 288 | 247.60 |
 | PG-19 | pyramidkv | 31.30 | 292 | 250.47 |
 | PG-19 | asw_kv | 31.23 | 292 | 250.47 |
@@ -77,22 +78,21 @@ The method does not train or modify model parameters.
 ## Latency results
 
 Latency was measured with a 512-token PG-19 prompt and 64 generated tokens on
-the GPU. The implementation uses a clear one-token-at-a-time Python decoding
-loop, so these numbers should be read as a reproducible policy comparison
-rather than an optimized serving benchmark.
+the GPU after an unmeasured CUDA warmup. The implementation uses a clear
+one-token-at-a-time Python decoding loop, so these numbers should be read as a
+reproducible policy comparison rather than an optimized serving benchmark.
 
 | Method | TTFT (s) | TPOT (ms) | Throughput (tok/s) | Peak memory (MB) |
 | --- | ---: | ---: | ---: | ---: |
-| dense | 9.38 | 17.87 | 6.09 | 165.62 |
-| sliding_window | 7.18 | 8.89 | 8.27 | 154.42 |
-| streamingllm | 4.45 | 8.83 | 12.77 | 154.56 |
-| lm_infinite | 4.45 | 9.77 | 12.63 | 154.56 |
-| h2o | 4.84 | 9.98 | 11.71 | 155.58 |
-| scissorhands | 4.69 | 9.49 | 12.10 | 155.58 |
-| tova | 4.58 | 11.49 | 12.07 | 155.57 |
-| snapkv | 4.76 | 9.54 | 11.95 | 155.57 |
-| pyramidkv | 4.81 | 9.16 | 11.88 | 155.71 |
-| asw_kv | 4.74 | 8.87 | 12.07 | 155.71 |
+| dense | 4.17 | 10.62 | 13.23 | 165.62 |
+| sliding_window | 5.12 | 9.64 | 11.18 | 154.42 |
+| streamingllm | 4.66 | 8.76 | 12.29 | 154.56 |
+| h2o | 5.27 | 10.42 | 10.80 | 155.58 |
+| scissorhands | 5.13 | 10.50 | 11.05 | 155.58 |
+| tova | 5.19 | 9.79 | 11.03 | 146.58 |
+| snapkv | 5.00 | 11.27 | 11.20 | 155.57 |
+| pyramidkv | 4.94 | 12.36 | 11.20 | 155.71 |
+| asw_kv | 6.78 | 9.78 | 8.65 | 155.71 |
 
 ## Discussion
 
@@ -109,13 +109,15 @@ PPL with a 288-token nominal budget. PyramidKV-lite, implemented with
 layer-weighted attention aggregation under a shared cache layout, is also
 competitive: 31.30 PPL on PG-19 and 35.58 on Wikitext-2.
 
-Not every method improves every dataset. TOVA-lite is reasonable on PG-19
-(31.37) but worse on Wikitext-2 (37.36). This likely happens because TOVA-lite
-does not reserve a full recent window; it keeps the newest token and the
-highest-attended historical tokens, so low-attention but locally useful tokens
-can be dropped. Scissorhands-lite is also weaker than H2O here, suggesting that
-running-maximum attention is less stable than cumulative attention for these
-short 1024-token tests.
+Not every method improves every dataset. TOVA-lite is the most aggressive
+compressed policy in this benchmark, with a nominal budget of only
+`important_size + 1 = 33` tokens. It therefore saves the most cache memory, but
+its PPL is much worse: 44.91 on PG-19 and 65.50 on Wikitext-2. This likely
+happens because TOVA-lite does not reserve a full recent window; it keeps the
+newest token and the highest-attended historical tokens, so low-attention but
+locally useful tokens can be dropped. Scissorhands-lite is also weaker than H2O
+here, suggesting that running-maximum attention is less stable than cumulative
+attention for these short 1024-token tests.
 
 ASW-KV improves the PPL/cache-size trade-off compared with StreamingLLM in both
 1024-token experiments. On PG-19, ASW-KV reduces PPL from 31.43 to 31.23 while
@@ -136,9 +138,12 @@ and reproducibility; an optimized version could update importance scores less
 frequently or reuse cached importance statistics.
 
 On the GPU latency smoke benchmark, compressed-cache methods reduce peak memory
-relative to dense cache. The latency script is intentionally simple, so the
-absolute timings can vary between runs, but the compressed methods consistently
-retain fewer KV tokens and lower peak CUDA memory than dense cache.
+relative to dense cache. The warmup removes the largest cold-start bias, but
+the latency script is intentionally simple, so absolute timings can still vary
+between runs. The clearest latency-side conclusion is memory: TOVA-lite reaches
+the lowest peak memory because it keeps only 33 tokens, while the other
+compressed methods also retain fewer KV tokens and lower peak CUDA memory than
+dense cache.
 
 ## Ablation: middle-token memory size
 

@@ -47,7 +47,9 @@ class CachePolicyConfig:
             return self.window_size
         if self.method in {"streamingllm", "lm_infinite"}:
             return self.sink_size + self.window_size
-        if self.method in {"h2o", "scissorhands", "tova", "snapkv"}:
+        if self.method == "tova":
+            return self.important_size + 1
+        if self.method in {"h2o", "scissorhands", "snapkv"}:
             return self.important_size + self.window_size
         return self.sink_size + self.important_size + self.window_size
 
@@ -109,12 +111,12 @@ def _unique_sorted(indices: Iterable[int]) -> list[int]:
 
 def select_keep_indices(
     config: CachePolicyConfig,
-    cache_positions: list[int],
+    cache_length: int,
     importance: Optional[torch.Tensor] = None,
 ) -> list[int]:
     """Select chronological cache slots to retain after the current token."""
 
-    length = len(cache_positions)
+    length = cache_length
     if config.method == "dense" or length == 0:
         return list(range(length))
 
@@ -243,6 +245,11 @@ class KVCacheRuntime:
             if self.config.needs_attention
             else None
         )
+        if self.config.needs_attention and importance is None:
+            raise RuntimeError(
+                f"{self.config.method} requires attention weights, but the model did not return them. "
+                "Load the model with attn_implementation='eager' or use a non-attention policy."
+            )
 
         selection_importance = importance
         state_importance = None
@@ -262,9 +269,12 @@ class KVCacheRuntime:
                     state_importance = torch.maximum(expanded_previous, importance)
                 selection_importance = state_importance
             else:
-                selection_importance = None
+                raise RuntimeError(
+                    f"{self.config.method} expected {len(new_positions)} attention scores, "
+                    f"but received {0 if importance is None else importance.numel()}."
+                )
 
-        keep_indices = select_keep_indices(self.config, new_positions, selection_importance)
+        keep_indices = select_keep_indices(self.config, len(new_positions), selection_importance)
 
         pruned_cache = prune_legacy_cache(full_cache, keep_indices)
         self.past_key_values = to_model_cache(pruned_cache)

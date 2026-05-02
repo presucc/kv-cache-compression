@@ -86,6 +86,29 @@ def _greedy_next_token(logits: torch.Tensor) -> torch.Tensor:
     return torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
 
 
+def warmup_model(
+    model,
+    tokenizer,
+    prompt: str,
+    device: torch.device,
+    max_prompt_tokens: int = 32,
+) -> None:
+    """Run small unmeasured forwards to remove CUDA cold-start overhead."""
+
+    if device.type != "cuda":
+        return
+
+    encoded = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=max_prompt_tokens)
+    input_ids = encoded.input_ids.to(device)
+    if input_ids.numel() == 0:
+        return
+
+    with torch.inference_mode():
+        model(input_ids=input_ids, use_cache=True, output_attentions=False, return_dict=True)
+        model(input_ids=input_ids, use_cache=True, output_attentions=True, return_dict=True)
+    _sync_if_cuda(device)
+
+
 def evaluate_latency(
     model,
     tokenizer,

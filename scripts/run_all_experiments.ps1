@@ -20,7 +20,7 @@ if (-not $env:PYTHONPATH) {
 }
 
 New-Item -ItemType Directory -Force -Path "results" | Out-Null
-$Methods = @("dense", "sliding_window", "streamingllm", "lm_infinite", "h2o", "scissorhands", "tova", "snapkv", "pyramidkv", "asw_kv")
+$Methods = @("dense", "sliding_window", "streamingllm", "h2o", "scissorhands", "tova", "snapkv", "pyramidkv", "asw_kv")
 
 Write-Host "== PG-19 PPL =="
 python scripts/run_ppl.py `

@@ -27,15 +27,6 @@
     "nominal_budget": 260
   },
   {
-    "method": "lm_infinite",
-    "tokens": 1024,
-    "nll": 3.588695526123047,
-    "ppl": 36.186840336469665,
-    "max_retained_tokens": 260,
-    "average_retained_tokens": 227.0869990224829,
-    "nominal_budget": 260
-  },
-  {
     "method": "h2o",
     "tokens": 1024,
     "nll": 3.569809913635254,
@@ -56,11 +47,11 @@
   {
     "method": "tova",
     "tokens": 1024,
-    "nll": 3.620729684829712,
-    "ppl": 37.36482242129626,
-    "max_retained_tokens": 288,
-    "average_retained_tokens": 247.60117302052785,
-    "nominal_budget": 288
+    "nll": 4.182010173797607,
+    "ppl": 65.49738209306199,
+    "max_retained_tokens": 33,
+    "average_retained_tokens": 32.483870967741936,
+    "nominal_budget": 33
   },
   {
     "method": "snapkv",

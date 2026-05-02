@@ -18,6 +18,8 @@ METHOD_CHOICES = [
     "asw_kv",
 ]
 
+DEFAULT_METHODS = [method for method in METHOD_CHOICES if method != "lm_infinite"]
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Measure generation latency under KV cache compression.")
@@ -33,7 +35,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--methods",
         nargs="+",
-        default=METHOD_CHOICES,
+        default=DEFAULT_METHODS,
         choices=METHOD_CHOICES,
     )
     parser.add_argument("--window-size", type=int, default=256)
@@ -50,7 +52,7 @@ def main() -> None:
     from tqdm import tqdm
 
     from llm_kv_compression.data import load_text_corpus
-    from llm_kv_compression.evaluation import configs_for_methods, evaluate_latency, result_to_dict
+    from llm_kv_compression.evaluation import configs_for_methods, evaluate_latency, result_to_dict, warmup_model
     from llm_kv_compression.modeling import load_model_and_tokenizer
 
     if args.prompt is None:
@@ -65,6 +67,7 @@ def main() -> None:
         prompt = args.prompt
 
     model, tokenizer, device = load_model_and_tokenizer(args.model, device=args.device, dtype=args.dtype)
+    warmup_model(model, tokenizer, prompt, device)
 
     results = []
     configs = configs_for_methods(args.methods, args.window_size, args.sink_size, args.important_size)
