@@ -20,32 +20,33 @@ if (-not $env:PYTHONPATH) {
 }
 
 New-Item -ItemType Directory -Force -Path "results" | Out-Null
+$Methods = @("dense", "sliding_window", "streamingllm", "lm_infinite", "h2o", "scissorhands", "tova", "snapkv", "pyramidkv", "asw_kv")
 
 Write-Host "== PG-19 PPL =="
 python scripts/run_ppl.py `
     --model $Model `
     --text-file $Pg19Text `
     --max-tokens $MaxTokens `
-    --methods dense sliding_window streamingllm h2o snapkv asw_kv `
+    --methods $Methods `
     --window-size $WindowSize `
     --sink-size $SinkSize `
     --important-size $ImportantSize `
     --device $Device `
     --dtype $DType `
-    --output results/ppl_pg19_1024_extended.json
+    --output results/ppl_pg19_1024_all_kv.json
 
 Write-Host "== Wikitext-2 PPL =="
 python scripts/run_ppl.py `
     --model $Model `
     --text-file $WikitextText `
     --max-tokens $MaxTokens `
-    --methods dense sliding_window streamingllm h2o snapkv asw_kv `
+    --methods $Methods `
     --window-size $WindowSize `
     --sink-size $SinkSize `
     --important-size $ImportantSize `
     --device $Device `
     --dtype $DType `
-    --output results/ppl_wikitext_1024_extended.json
+    --output results/ppl_wikitext_1024_all_kv.json
 
 Write-Host "== PG-19 important_size ablation =="
 $ablation = @()
@@ -75,16 +76,16 @@ if (-not $SkipLatency) {
         --text-file $Pg19Text `
         --max-prompt-tokens 512 `
         --max-new-tokens 64 `
-        --methods dense sliding_window streamingllm h2o snapkv asw_kv `
+        --methods $Methods `
         --window-size $WindowSize `
         --sink-size $SinkSize `
         --important-size $ImportantSize `
         --device cuda `
         --dtype float16 `
-        --output results/latency_pg19_gpu_512_64_extended.json
+        --output results/latency_pg19_gpu_512_64_all_kv.json
 }
 
 Write-Host "== Summary =="
-python scripts/summarize_results.py results/ppl_pg19_1024_extended.json --columns method ppl max_retained_tokens average_retained_tokens
-python scripts/summarize_results.py results/ppl_wikitext_1024_extended.json --columns method ppl max_retained_tokens average_retained_tokens
+python scripts/summarize_results.py results/ppl_pg19_1024_all_kv.json --columns method ppl max_retained_tokens average_retained_tokens
+python scripts/summarize_results.py results/ppl_wikitext_1024_all_kv.json --columns method ppl max_retained_tokens average_retained_tokens
 python scripts/summarize_results.py results/ablation_pg19_important_size.json --columns important_size ppl max_retained_tokens average_retained_tokens

@@ -11,8 +11,14 @@ preserving language modeling quality and measuring inference latency.
 - `dense`: full KV cache, used as the quality baseline.
 - `sliding_window`: keeps only recent tokens.
 - `streamingllm`: keeps attention sink tokens plus recent tokens.
+- `lm_infinite`: keeps initial tokens plus recent tokens.
 - `h2o`: keeps cumulative attention heavy hitters plus recent tokens.
+- `scissorhands`: keeps tokens with persistent high attention plus recent
+  tokens.
+- `tova`: keeps the current token and highest-attended historical tokens.
 - `snapkv`: keeps current-attention-selected middle tokens plus recent tokens.
+- `pyramidkv`: keeps sink, recent, and layer-weighted attention-selected
+  middle tokens.
 - `asw_kv`: keeps attention sink tokens, attention-selected middle tokens, and
   recent tokens.
 
@@ -50,14 +56,22 @@ The method does not train or modify model parameters.
 | Wikitext-2 | dense | 30.15 | 1023 | 512.00 |
 | Wikitext-2 | sliding_window | 42.95 | 256 | 224.09 |
 | Wikitext-2 | streamingllm | 36.19 | 260 | 227.09 |
+| Wikitext-2 | lm_infinite | 36.19 | 260 | 227.09 |
 | Wikitext-2 | h2o | 35.51 | 288 | 247.60 |
+| Wikitext-2 | scissorhands | 36.44 | 288 | 247.60 |
+| Wikitext-2 | tova | 37.36 | 288 | 247.60 |
 | Wikitext-2 | snapkv | 36.16 | 288 | 247.60 |
+| Wikitext-2 | pyramidkv | 35.58 | 292 | 250.47 |
 | Wikitext-2 | asw_kv | 35.68 | 292 | 250.47 |
 | PG-19 | dense | 31.10 | 1023 | 512.00 |
 | PG-19 | sliding_window | 36.30 | 256 | 224.09 |
 | PG-19 | streamingllm | 31.43 | 260 | 227.09 |
+| PG-19 | lm_infinite | 31.43 | 260 | 227.09 |
 | PG-19 | h2o | 31.39 | 288 | 247.60 |
+| PG-19 | scissorhands | 31.43 | 288 | 247.60 |
+| PG-19 | tova | 31.37 | 288 | 247.60 |
 | PG-19 | snapkv | 31.23 | 288 | 247.60 |
+| PG-19 | pyramidkv | 31.30 | 292 | 250.47 |
 | PG-19 | asw_kv | 31.23 | 292 | 250.47 |
 
 ## Latency results
@@ -69,12 +83,16 @@ rather than an optimized serving benchmark.
 
 | Method | TTFT (s) | TPOT (ms) | Throughput (tok/s) | Peak memory (MB) |
 | --- | ---: | ---: | ---: | ---: |
-| dense | 10.25 | 18.37 | 5.61 | 165.62 |
-| sliding_window | 9.88 | 18.22 | 5.81 | 154.42 |
-| streamingllm | 6.29 | 10.79 | 9.19 | 154.56 |
-| h2o | 5.76 | 10.37 | 9.98 | 155.58 |
-| snapkv | 5.29 | 10.53 | 10.76 | 155.57 |
-| asw_kv | 5.12 | 10.58 | 11.06 | 155.71 |
+| dense | 9.38 | 17.87 | 6.09 | 165.62 |
+| sliding_window | 7.18 | 8.89 | 8.27 | 154.42 |
+| streamingllm | 4.45 | 8.83 | 12.77 | 154.56 |
+| lm_infinite | 4.45 | 9.77 | 12.63 | 154.56 |
+| h2o | 4.84 | 9.98 | 11.71 | 155.58 |
+| scissorhands | 4.69 | 9.49 | 12.10 | 155.58 |
+| tova | 4.58 | 11.49 | 12.07 | 155.57 |
+| snapkv | 4.76 | 9.54 | 11.95 | 155.57 |
+| pyramidkv | 4.81 | 9.16 | 11.88 | 155.71 |
+| asw_kv | 4.74 | 8.87 | 12.07 | 155.71 |
 
 ## Discussion
 
@@ -83,11 +101,21 @@ PPL drops from 36.30 with `sliding_window` to 31.43 with `streamingllm`, nearly
 recovering the dense-cache result of 31.10. On Wikitext-2, `streamingllm` also
 improves over `sliding_window`, reducing PPL from 42.95 to 36.19.
 
-The two additional reproduced methods give useful reference points. H2O-lite
-uses cumulative attention scores and is strongest on Wikitext-2, reducing PPL
-from 36.19 with `streamingllm` to 35.51. SnapKV-lite uses the current query's
+The additional reproduced methods give useful reference points. H2O-lite uses
+cumulative attention scores and is strongest on Wikitext-2, reducing PPL from
+36.19 with `streamingllm` to 35.51. SnapKV-lite uses the current query's
 attention scores and is strongest on the tested PG-19 sample, reaching 31.23
-PPL with a 288-token nominal budget.
+PPL with a 288-token nominal budget. PyramidKV-lite, implemented with
+layer-weighted attention aggregation under a shared cache layout, is also
+competitive: 31.30 PPL on PG-19 and 35.58 on Wikitext-2.
+
+Not every method improves every dataset. TOVA-lite is reasonable on PG-19
+(31.37) but worse on Wikitext-2 (37.36). This likely happens because TOVA-lite
+does not reserve a full recent window; it keeps the newest token and the
+highest-attended historical tokens, so low-attention but locally useful tokens
+can be dropped. Scissorhands-lite is also weaker than H2O here, suggesting that
+running-maximum attention is less stable than cumulative attention for these
+short 1024-token tests.
 
 ASW-KV improves the PPL/cache-size trade-off compared with StreamingLLM in both
 1024-token experiments. On PG-19, ASW-KV reduces PPL from 31.43 to 31.23 while
@@ -95,6 +123,12 @@ still keeping the maximum retained cache far below dense cache size
 (292 vs. 1023 tokens). On Wikitext-2, ASW-KV reduces PPL from 36.19 to 35.68.
 Compared with SnapKV-lite, ASW-KV adds four attention sink tokens; compared
 with H2O-lite, it uses instant attention rather than cumulative attention.
+
+InfLLM and TreeKV are not included in the unified table because they require a
+block-retrieval or tree-structured cache design that is outside this simple
+one-token-at-a-time retention framework. They are better evaluated with a
+separate implementation rather than forced into the same per-token selection
+API.
 
 ASW-KV uses attention scores, so its quality gain should be weighed against the
 cost of requesting attention weights. The current implementation favors clarity

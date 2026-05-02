@@ -6,7 +6,18 @@ from typing import Iterable, Optional
 import torch
 
 
-SUPPORTED_METHODS = {"dense", "sliding_window", "streamingllm", "h2o", "snapkv", "asw_kv"}
+SUPPORTED_METHODS = {
+    "dense",
+    "sliding_window",
+    "streamingllm",
+    "lm_infinite",
+    "h2o",
+    "scissorhands",
+    "tova",
+    "snapkv",
+    "pyramidkv",
+    "asw_kv",
+}
 
 
 @dataclass(frozen=True)
@@ -26,7 +37,7 @@ class CachePolicyConfig:
 
     @property
     def needs_attention(self) -> bool:
-        return self.method in {"h2o", "snapkv", "asw_kv"}
+        return self.method in {"h2o", "scissorhands", "tova", "snapkv", "pyramidkv", "asw_kv"}
 
     @property
     def nominal_budget(self) -> Optional[int]:
@@ -34,9 +45,9 @@ class CachePolicyConfig:
             return None
         if self.method == "sliding_window":
             return self.window_size
-        if self.method == "streamingllm":
+        if self.method in {"streamingllm", "lm_infinite"}:
             return self.sink_size + self.window_size
-        if self.method in {"h2o", "snapkv"}:
+        if self.method in {"h2o", "scissorhands", "tova", "snapkv"}:
             return self.important_size + self.window_size
         return self.sink_size + self.important_size + self.window_size
 
@@ -64,7 +75,7 @@ def to_model_cache(past_key_values):
         return past_key_values
 
 
-def summarize_attention_importance(attentions) -> Optional[torch.Tensor]:
+def summarize_attention_importance(attentions, layer_weighting: str = "uniform") -> Optional[torch.Tensor]:
     """Average last-query attention over layers and heads.
 
     Returns a vector with one score for every slot in the current retained cache.
@@ -83,7 +94,13 @@ def summarize_attention_importance(attentions) -> Optional[torch.Tensor]:
 
     if not vectors:
         return None
-    return torch.stack(vectors, dim=0).mean(dim=0)
+
+    stacked = torch.stack(vectors, dim=0)
+    if layer_weighting == "pyramid":
+        weights = torch.linspace(1.0, 2.0, stacked.shape[0], device=stacked.device, dtype=stacked.dtype)
+        weights = weights / weights.sum()
+        return (stacked * weights[:, None]).sum(dim=0)
+    return stacked.mean(dim=0)
 
 
 def _unique_sorted(indices: Iterable[int]) -> list[int]:
@@ -114,10 +131,25 @@ def select_keep_indices(
     sink = range(0, sink_end)
     recent = range(recent_start, length)
 
-    if config.method == "streamingllm":
+    if config.method in {"streamingllm", "lm_infinite"}:
         return _unique_sorted([*sink, *recent])
 
-    if config.method in {"h2o", "snapkv"}:
+    if config.method == "tova":
+        protected = {length - 1}
+        candidates = [idx for idx in range(length - 1)]
+        keep_count = min(max((config.nominal_budget or length) - 1, 0), len(candidates))
+        if keep_count == 0:
+            return [length - 1]
+        if importance is not None and importance.numel() == length:
+            candidate_tensor = torch.tensor(candidates, device=importance.device)
+            candidate_scores = importance.index_select(0, candidate_tensor)
+            top_local = torch.topk(candidate_scores, k=keep_count).indices
+            important = candidate_tensor.index_select(0, top_local).detach().cpu().tolist()
+        else:
+            important = candidates[-keep_count:]
+        return _unique_sorted([*protected, *important])
+
+    if config.method in {"h2o", "scissorhands", "snapkv"}:
         recent_start = max(0, length - config.window_size)
         protected = set(range(recent_start, length))
     else:
@@ -205,22 +237,30 @@ class KVCacheRuntime:
 
         full_cache = as_legacy_cache(outputs.past_key_values)
         new_positions = [*self.cache_positions, self.total_seen]
-        importance = summarize_attention_importance(outputs.attentions) if self.config.needs_attention else None
+        layer_weighting = "pyramid" if self.config.method == "pyramidkv" else "uniform"
+        importance = (
+            summarize_attention_importance(outputs.attentions, layer_weighting=layer_weighting)
+            if self.config.needs_attention
+            else None
+        )
 
         selection_importance = importance
-        cumulative_importance = None
-        if self.config.method == "h2o":
+        state_importance = None
+        if self.config.method in {"h2o", "scissorhands"}:
             if importance is not None and importance.numel() == len(new_positions):
                 previous = self.importance_scores
                 if previous is None or previous.numel() != cache_len:
                     previous = torch.zeros(cache_len, dtype=importance.dtype, device=importance.device)
                 else:
                     previous = previous.to(device=importance.device, dtype=importance.dtype)
-                cumulative_importance = torch.cat(
+                expanded_previous = torch.cat(
                     [previous, torch.zeros(1, dtype=importance.dtype, device=importance.device)]
                 )
-                cumulative_importance = cumulative_importance + importance
-                selection_importance = cumulative_importance
+                if self.config.method == "h2o":
+                    state_importance = expanded_previous + importance
+                else:
+                    state_importance = torch.maximum(expanded_previous, importance)
+                selection_importance = state_importance
             else:
                 selection_importance = None
 
@@ -229,9 +269,9 @@ class KVCacheRuntime:
         pruned_cache = prune_legacy_cache(full_cache, keep_indices)
         self.past_key_values = to_model_cache(pruned_cache)
         self.cache_positions = [new_positions[idx] for idx in keep_indices]
-        if self.config.method == "h2o" and cumulative_importance is not None:
-            index = torch.tensor(keep_indices, device=cumulative_importance.device, dtype=torch.long)
-            self.importance_scores = cumulative_importance.index_select(0, index).detach()
+        if self.config.method in {"h2o", "scissorhands"} and state_importance is not None:
+            index = torch.tensor(keep_indices, device=state_importance.device, dtype=torch.long)
+            self.importance_scores = state_importance.index_select(0, index).detach()
         else:
             self.importance_scores = None
         self.total_seen += 1

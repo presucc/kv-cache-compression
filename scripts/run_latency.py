@@ -5,6 +5,20 @@ import json
 from pathlib import Path
 
 
+METHOD_CHOICES = [
+    "dense",
+    "sliding_window",
+    "streamingllm",
+    "lm_infinite",
+    "h2o",
+    "scissorhands",
+    "tova",
+    "snapkv",
+    "pyramidkv",
+    "asw_kv",
+]
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Measure generation latency under KV cache compression.")
     parser.add_argument("--model", default="EleutherAI/pythia-70m")
@@ -19,8 +33,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--methods",
         nargs="+",
-        default=["dense", "sliding_window", "streamingllm", "h2o", "snapkv", "asw_kv"],
-        choices=["dense", "sliding_window", "streamingllm", "h2o", "snapkv", "asw_kv"],
+        default=METHOD_CHOICES,
+        choices=METHOD_CHOICES,
     )
     parser.add_argument("--window-size", type=int, default=256)
     parser.add_argument("--sink-size", type=int, default=4)

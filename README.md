@@ -24,21 +24,29 @@ PPL experiments use 1024 tokens, `sink_size=4`, `window_size=256`, and
 | PG-19 | dense | 31.10 | 1023 | 512.00 |
 | PG-19 | sliding_window | 36.30 | 256 | 224.09 |
 | PG-19 | streamingllm | 31.43 | 260 | 227.09 |
+| PG-19 | lm_infinite | 31.43 | 260 | 227.09 |
 | PG-19 | h2o | 31.39 | 288 | 247.60 |
+| PG-19 | scissorhands | 31.43 | 288 | 247.60 |
+| PG-19 | tova | 31.37 | 288 | 247.60 |
 | PG-19 | snapkv | 31.23 | 288 | 247.60 |
+| PG-19 | pyramidkv | 31.30 | 292 | 250.47 |
 | PG-19 | asw_kv | 31.23 | 292 | 250.47 |
 | Wikitext-2 | dense | 30.15 | 1023 | 512.00 |
 | Wikitext-2 | sliding_window | 42.95 | 256 | 224.09 |
 | Wikitext-2 | streamingllm | 36.19 | 260 | 227.09 |
+| Wikitext-2 | lm_infinite | 36.19 | 260 | 227.09 |
 | Wikitext-2 | h2o | 35.51 | 288 | 247.60 |
+| Wikitext-2 | scissorhands | 36.44 | 288 | 247.60 |
+| Wikitext-2 | tova | 37.36 | 288 | 247.60 |
 | Wikitext-2 | snapkv | 36.16 | 288 | 247.60 |
+| Wikitext-2 | pyramidkv | 35.58 | 292 | 250.47 |
 | Wikitext-2 | asw_kv | 35.68 | 292 | 250.47 |
 
 The added baselines make the trade-off clearer: H2O-lite is strongest on
-Wikitext-2, SnapKV-lite is strongest on this PG-19 sample, and ASW-KV remains
-competitive while explicitly combining attention sinks, selected middle tokens,
-and the recent window. All compressed methods keep the maximum KV cache far
-below the dense baseline.
+Wikitext-2, SnapKV-lite is strongest on this PG-19 sample, PyramidKV-lite is
+also competitive, and ASW-KV remains competitive while explicitly combining
+attention sinks, selected middle tokens, and the recent window. All compressed
+methods keep the maximum KV cache far below the dense baseline.
 
 ## Ablation
 
@@ -62,12 +70,16 @@ GPU latency was measured on an NVIDIA GeForce RTX 4080 Laptop GPU with a
 
 | Method | TTFT (s) | TPOT (ms) | Throughput (tok/s) | Peak memory (MB) |
 | --- | ---: | ---: | ---: | ---: |
-| dense | 10.25 | 18.37 | 5.61 | 165.62 |
-| sliding_window | 9.88 | 18.22 | 5.81 | 154.42 |
-| streamingllm | 6.29 | 10.79 | 9.19 | 154.56 |
-| h2o | 5.76 | 10.37 | 9.98 | 155.58 |
-| snapkv | 5.29 | 10.53 | 10.76 | 155.57 |
-| asw_kv | 5.12 | 10.58 | 11.06 | 155.71 |
+| dense | 9.38 | 17.87 | 6.09 | 165.62 |
+| sliding_window | 7.18 | 8.89 | 8.27 | 154.42 |
+| streamingllm | 4.45 | 8.83 | 12.77 | 154.56 |
+| lm_infinite | 4.45 | 9.77 | 12.63 | 154.56 |
+| h2o | 4.84 | 9.98 | 11.71 | 155.58 |
+| scissorhands | 4.69 | 9.49 | 12.10 | 155.58 |
+| tova | 4.58 | 11.49 | 12.07 | 155.57 |
+| snapkv | 4.76 | 9.54 | 11.95 | 155.57 |
+| pyramidkv | 4.81 | 9.16 | 11.88 | 155.71 |
+| asw_kv | 4.74 | 8.87 | 12.07 | 155.71 |
 
 The implementation uses a clear one-token-at-a-time Python decoding loop, so
 these numbers should be read as reproducible policy comparisons rather than an
@@ -78,16 +90,25 @@ optimized serving benchmark.
 - `dense`: keep the full KV cache.
 - `sliding_window`: keep only the most recent tokens.
 - `streamingllm`: keep attention sink tokens plus the recent window.
+- `lm_infinite`: keep initial tokens plus the local window. In this lightweight
+  setting it matches the StreamingLLM cache layout.
 - `h2o`: keep cumulative attention heavy hitters plus the recent window.
+- `scissorhands`: keep tokens with persistent high historical attention plus
+  the recent window.
+- `tova`: keep the current token and the highest-attended historical tokens.
 - `snapkv`: keep current-attention-selected middle tokens plus the recent
   window.
+- `pyramidkv`: keep sink, recent, and layer-weighted attention-selected middle
+  tokens.
 - `asw_kv`: keep attention sink tokens, attention-selected middle tokens, and
   the recent window.
 
 For `h2o`, token importance is the cumulative attention mass received over
-time. For `snapkv` and `asw_kv`, middle-token importance is computed from the
-average attention paid by the current query to retained historical tokens. The
-top `important_size` eligible tokens are kept.
+time. For `scissorhands`, importance is the running maximum attention score.
+For `snapkv`, `pyramidkv`, and `asw_kv`, middle-token importance is computed
+from the average attention paid by the current query to retained historical
+tokens. PyramidKV-lite gives deeper layers larger aggregation weights. The top
+`important_size` eligible tokens are kept.
 
 ## Setup
 
@@ -178,11 +199,11 @@ python scripts\run_ppl.py `
   --model EleutherAI/pythia-70m `
   --text-file data/pg19_raw/test/10146.txt `
   --max-tokens 1024 `
-  --methods dense sliding_window streamingllm h2o snapkv asw_kv `
+  --methods dense sliding_window streamingllm lm_infinite h2o scissorhands tova snapkv pyramidkv asw_kv `
   --window-size 256 `
   --sink-size 4 `
   --important-size 32 `
-  --output results/ppl_pg19_1024_extended.json
+  --output results/ppl_pg19_1024_all_kv.json
 ```
 
 Wikitext-2 PPL:
@@ -192,11 +213,11 @@ python scripts\run_ppl.py `
   --model EleutherAI/pythia-70m `
   --text-file data/wikitext_validation.txt `
   --max-tokens 1024 `
-  --methods dense sliding_window streamingllm h2o snapkv asw_kv `
+  --methods dense sliding_window streamingllm lm_infinite h2o scissorhands tova snapkv pyramidkv asw_kv `
   --window-size 256 `
   --sink-size 4 `
   --important-size 32 `
-  --output results/ppl_wikitext_1024_extended.json
+  --output results/ppl_wikitext_1024_all_kv.json
 ```
 
 GPU latency:
@@ -207,13 +228,13 @@ python scripts\run_latency.py `
   --text-file data/pg19_raw/test/10146.txt `
   --max-prompt-tokens 512 `
   --max-new-tokens 64 `
-  --methods dense sliding_window streamingllm h2o snapkv asw_kv `
+  --methods dense sliding_window streamingllm lm_infinite h2o scissorhands tova snapkv pyramidkv asw_kv `
   --window-size 256 `
   --sink-size 4 `
   --important-size 32 `
   --device cuda `
   --dtype float16 `
-  --output results/latency_pg19_gpu_512_64_extended.json
+  --output results/latency_pg19_gpu_512_64_all_kv.json
 ```
 
 ASW-KV ablation:
@@ -256,6 +277,9 @@ REPORT.md
 - ASW-KV requests attention weights, which adds overhead. The method is meant
   to study quality/cache trade-offs; a production implementation should update
   importance scores less frequently or fuse the bookkeeping.
+- InfLLM and TreeKV are not included in the unified benchmark because they need
+  block-retrieval or tree-structured cache machinery rather than the shared
+  per-token retention API used here.
 - The latency script is intentionally simple and reproducible. It is not a
   substitute for optimized serving systems such as vLLM or TensorRT-LLM.
 - `torchvision` and `torchaudio` are not required for this text-only project.
@@ -263,8 +287,13 @@ REPORT.md
 ## References
 
 - StreamingLLM: Efficient Streaming Language Models with Attention Sinks.
+- LM-Infinite: Simple On-the-Fly Length Generalization for Large Language
+  Models.
 - H2O: Heavy-Hitter Oracle for Efficient Generative Inference of Large
   Language Models.
+- Scissorhands: Exploiting the Persistence of Importance Hypothesis for LLM KV
+  Cache Compression at Test Time.
+- TOVA: Token Omission Via Attention for Efficient KV Cache Compression.
 - SnapKV: LLM Knows What You are Looking for Before Generation.
 - PyramidKV: Dynamic KV Cache Compression based on Pyramidal Information
   Funneling.
