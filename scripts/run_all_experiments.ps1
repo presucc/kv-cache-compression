@@ -20,7 +20,7 @@ if (-not $env:PYTHONPATH) {
 }
 
 New-Item -ItemType Directory -Force -Path "results" | Out-Null
-$Methods = @("dense", "streamingllm", "sink_snapkv", "pyramid_sinkkv")
+$Methods = @("dense", "streamingllm", "sink_snapkv")
 
 Write-Host "== PG-19 PPL =="
 python scripts/run_ppl.py `
@@ -48,27 +48,6 @@ python scripts/run_ppl.py `
     --dtype $DType `
     --output results/ppl_wikitext_1024_all_kv.json
 
-Write-Host "== PG-19 layer allocation ablation =="
-$ablation = @()
-foreach ($method in "sink_snapkv", "pyramid_sinkkv", "reverse_pyramid_sinkkv") {
-    $out = "results/ablation_pg19_$method.json"
-    python scripts/run_ppl.py `
-        --model $Model `
-        --text-file $Pg19Text `
-        --max-tokens $MaxTokens `
-        --methods $method `
-        --window-size $WindowSize `
-        --sink-size $SinkSize `
-        --important-size $ImportantSize `
-        --device $Device `
-        --dtype $DType `
-        --output $out
-    $row = Get-Content -Raw -LiteralPath $out | ConvertFrom-Json
-    $row | Add-Member -NotePropertyName allocation -NotePropertyValue $method -Force
-    $ablation += $row
-}
-$ablation | ConvertTo-Json -Depth 10 | Set-Content -Encoding UTF8 -LiteralPath "results/ablation_pg19_layer_allocation.json"
-
 if (-not $SkipLatency) {
     Write-Host "== GPU latency =="
     python scripts/run_latency.py `
@@ -88,4 +67,3 @@ if (-not $SkipLatency) {
 Write-Host "== Summary =="
 python scripts/summarize_results.py results/ppl_pg19_1024_all_kv.json --columns method ppl max_retained_tokens average_retained_tokens
 python scripts/summarize_results.py results/ppl_wikitext_1024_all_kv.json --columns method ppl max_retained_tokens average_retained_tokens
-python scripts/summarize_results.py results/ablation_pg19_layer_allocation.json --columns allocation ppl max_retained_tokens average_retained_tokens

@@ -9,9 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from llm_kv_compression.cache import (
     CachePolicyConfig,
-    layer_budget_for_method,
     prune_legacy_cache,
-    select_per_layer_keep_indices,
     select_keep_indices,
     summarize_attention_importance,
 )
@@ -72,61 +70,20 @@ def test_pyramidkv_keeps_sink_weighted_middle_and_recent_tokens():
     assert keep == [0, 1, 3, 5, 6, 7]
 
 
-def test_pyramid_sinkkv_assigns_larger_budgets_to_lower_layers():
-    config = CachePolicyConfig(method="pyramid_sinkkv", window_size=256, important_size=32)
-    budgets = [layer_budget_for_method(config, layer_idx, 6) for layer_idx in range(6)]
-    assert [(budget.window_size, budget.important_size) for budget in budgets] == [
-        (384, 48),
-        (384, 48),
-        (256, 32),
-        (256, 32),
-        (128, 16),
-        (128, 16),
-    ]
-
-
-def test_reverse_pyramid_sinkkv_assigns_larger_budgets_to_higher_layers():
-    config = CachePolicyConfig(method="reverse_pyramid_sinkkv", window_size=256, important_size=32)
-    budgets = [layer_budget_for_method(config, layer_idx, 6) for layer_idx in range(6)]
-    assert [(budget.window_size, budget.important_size) for budget in budgets] == [
-        (128, 16),
-        (128, 16),
-        (256, 32),
-        (256, 32),
-        (384, 48),
-        (384, 48),
-    ]
-
-
-def test_pyramid_sinkkv_selects_different_indices_per_layer():
-    config = CachePolicyConfig(method="pyramid_sinkkv", sink_size=1, window_size=4, important_size=2)
-    layer_importance = [
-        torch.tensor([0.0, 0.9, 0.1, 0.8, 0.2, 0.7, 0.0, 0.0]),
-        torch.tensor([0.0, 0.1, 0.9, 0.2, 0.8, 0.3, 0.0, 0.0]),
-        torch.tensor([0.0, 0.1, 0.9, 0.2, 0.8, 0.3, 0.0, 0.0]),
-    ]
-    keep = select_per_layer_keep_indices(config, [8, 8, 8], layer_importance)
-    assert keep[0] == list(range(8))
-    assert keep[1] == [0, 2, 3, 4, 5, 6, 7]
-    assert keep[2] == [0, 2, 6, 7]
-
-
-def test_prune_legacy_cache_supports_per_layer_indices():
-    key0 = torch.arange(1 * 1 * 5 * 2).reshape(1, 1, 5, 2)
-    value0 = key0 + 100
-    key1 = key0 + 1000
-    value1 = key1 + 100
-    pruned = prune_legacy_cache(((key0, value0), (key1, value1)), [[0, 2, 4], [1, 3]])
-    assert pruned[0][0].shape == (1, 1, 3, 2)
-    assert pruned[1][0].shape == (1, 1, 2, 2)
-    assert torch.equal(pruned[1][0][:, :, 0, :], key1[:, :, 1, :])
-
-
 def test_pyramid_attention_summary_weights_deeper_layers_more():
     layer_0 = torch.tensor([[[[0.8, 0.2]]]])
     layer_1 = torch.tensor([[[[0.2, 0.8]]]])
     summary = summarize_attention_importance([layer_0, layer_1], layer_weighting="pyramid")
     assert summary[1] > summary[0]
+
+
+def test_unknown_method_is_not_supported():
+    try:
+        CachePolicyConfig(method="unsupported_method")
+    except ValueError as exc:
+        assert "Unknown method" in str(exc)
+    else:
+        raise AssertionError("unknown method should not be accepted")
 
 
 def test_prune_legacy_cache_prunes_sequence_dimension():

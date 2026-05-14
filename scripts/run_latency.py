@@ -16,11 +16,9 @@ METHOD_CHOICES = [
     "snapkv",
     "pyramidkv",
     "sink_snapkv",
-    "pyramid_sinkkv",
-    "reverse_pyramid_sinkkv",
 ]
 
-DEFAULT_METHODS = ["dense", "streamingllm", "sink_snapkv", "pyramid_sinkkv"]
+DEFAULT_METHODS = ["dense", "streamingllm", "sink_snapkv"]
 
 
 def parse_args() -> argparse.Namespace:

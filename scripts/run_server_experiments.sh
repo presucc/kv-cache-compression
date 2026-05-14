@@ -16,15 +16,13 @@ LATENCY_DTYPE="${LATENCY_DTYPE:-float16}"
 MAX_PROMPT_TOKENS="${MAX_PROMPT_TOKENS:-512}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-64}"
 SKIP_LATENCY="${SKIP_LATENCY:-0}"
-RUN_BUDGET_SWEEP="${RUN_BUDGET_SWEEP:-1}"
 RUN_FULL_SUITE="${RUN_FULL_SUITE:-1}"
 RUN_FULL_LATENCY="${RUN_FULL_LATENCY:-1}"
 
 export PYTHONPATH="${PYTHONPATH:-src}"
 mkdir -p "$RESULT_DIR"
 
-main_methods=(dense streamingllm sink_snapkv pyramid_sinkkv)
-allocation_methods=(sink_snapkv pyramid_sinkkv reverse_pyramid_sinkkv)
+main_methods=(dense streamingllm sink_snapkv)
 all_methods=(
   dense
   sliding_window
@@ -36,8 +34,6 @@ all_methods=(
   snapkv
   pyramidkv
   sink_snapkv
-  pyramid_sinkkv
-  reverse_pyramid_sinkkv
 )
 
 dataset_args() {
@@ -81,32 +77,6 @@ python scripts/run_ppl.py \
   --dtype "$DTYPE" \
   --output "$RESULT_DIR/ppl_wikitext_main.json"
 
-echo "== PG-19 layer-allocation ablation =="
-python scripts/run_ppl.py \
-  --model "$MODEL" \
-  "${pg19_args[@]}" \
-  --max-tokens "$MAX_TOKENS" \
-  --methods "${allocation_methods[@]}" \
-  --window-size "$WINDOW_SIZE" \
-  --sink-size "$SINK_SIZE" \
-  --important-size "$IMPORTANT_SIZE" \
-  --device "$DEVICE" \
-  --dtype "$DTYPE" \
-  --output "$RESULT_DIR/ablation_pg19_layer_allocation.json"
-
-echo "== Wikitext-2 layer-allocation ablation =="
-python scripts/run_ppl.py \
-  --model "$MODEL" \
-  "${wikitext_args[@]}" \
-  --max-tokens "$MAX_TOKENS" \
-  --methods "${allocation_methods[@]}" \
-  --window-size "$WINDOW_SIZE" \
-  --sink-size "$SINK_SIZE" \
-  --important-size "$IMPORTANT_SIZE" \
-  --device "$DEVICE" \
-  --dtype "$DTYPE" \
-  --output "$RESULT_DIR/ablation_wikitext_layer_allocation.json"
-
 if [[ "$RUN_FULL_SUITE" != "0" ]]; then
   echo "== PG-19 full method suite PPL =="
   python scripts/run_ppl.py \
@@ -133,24 +103,6 @@ if [[ "$RUN_FULL_SUITE" != "0" ]]; then
     --device "$DEVICE" \
     --dtype "$DTYPE" \
     --output "$RESULT_DIR/ppl_wikitext_all_methods.json"
-fi
-
-if [[ "$RUN_BUDGET_SWEEP" != "0" ]]; then
-  echo "== PG-19 budget sweep =="
-  for pair in "128 16" "256 32" "384 48"; do
-    read -r budget_window budget_important <<< "$pair"
-    python scripts/run_ppl.py \
-      --model "$MODEL" \
-      "${pg19_args[@]}" \
-      --max-tokens "$MAX_TOKENS" \
-      --methods sink_snapkv pyramid_sinkkv \
-      --window-size "$budget_window" \
-      --sink-size "$SINK_SIZE" \
-      --important-size "$budget_important" \
-      --device "$DEVICE" \
-      --dtype "$DTYPE" \
-      --output "$RESULT_DIR/budget_pg19_w${budget_window}_i${budget_important}.json"
-  done
 fi
 
 if [[ "$SKIP_LATENCY" == "0" ]]; then

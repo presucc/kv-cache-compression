@@ -38,24 +38,6 @@ append_table() {
   append_table "Wikitext-2 All Methods PPL" "$RESULT_DIR/ppl_wikitext_all_methods.json" \
     method ppl max_retained_tokens average_retained_tokens nominal_budget
 
-  append_table "PG-19 Layer Allocation Ablation" "$RESULT_DIR/ablation_pg19_layer_allocation.json" \
-    method ppl max_retained_tokens average_retained_tokens nominal_budget
-
-  append_table "Wikitext-2 Layer Allocation Ablation" "$RESULT_DIR/ablation_wikitext_layer_allocation.json" \
-    method ppl max_retained_tokens average_retained_tokens nominal_budget
-
-  echo
-  echo "## PG-19 Budget Sweep"
-  for file in "$RESULT_DIR"/budget_pg19_w*_i*.json; do
-    if [[ -f "$file" ]]; then
-      echo
-      echo "### $(basename "$file" .json)"
-      echo
-      python scripts/summarize_results.py "$file" --columns \
-        method ppl max_retained_tokens average_retained_tokens nominal_budget
-    fi
-  done
-
   append_table "PG-19 Latency" "$RESULT_DIR/latency_pg19_main.json" \
     method ttft_seconds tpot_seconds throughput_tokens_per_second peak_cuda_memory_mb max_retained_tokens average_retained_tokens
 

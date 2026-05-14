@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from types import MethodType
 from typing import Iterable, Optional
 
 import torch
@@ -19,8 +18,6 @@ SUPPORTED_METHODS = {
     "snapkv",
     "pyramidkv",
     "sink_snapkv",
-    "pyramid_sinkkv",
-    "reverse_pyramid_sinkkv",
 }
 
 ATTENTION_METHODS = {
@@ -30,11 +27,7 @@ ATTENTION_METHODS = {
     "snapkv",
     "pyramidkv",
     "sink_snapkv",
-    "pyramid_sinkkv",
-    "reverse_pyramid_sinkkv",
 }
-
-PER_LAYER_METHODS = {"pyramid_sinkkv", "reverse_pyramid_sinkkv"}
 
 
 def _transformers_version_tuple() -> tuple[int, int]:
@@ -88,10 +81,6 @@ class CachePolicyConfig:
         return self.method in ATTENTION_METHODS
 
     @property
-    def is_per_layer(self) -> bool:
-        return self.method in PER_LAYER_METHODS
-
-    @property
     def nominal_budget(self) -> Optional[int]:
         if self.method == "dense":
             return None
@@ -106,12 +95,6 @@ class CachePolicyConfig:
         return self.sink_size + self.important_size + self.window_size
 
 
-@dataclass(frozen=True)
-class LayerBudget:
-    window_size: int
-    important_size: int
-
-
 def as_legacy_cache(past_key_values):
     """Return a tuple-based cache when Transformers returns a Cache object."""
 
@@ -122,7 +105,7 @@ def as_legacy_cache(past_key_values):
     return past_key_values
 
 
-def to_model_cache(past_key_values, use_max_seq_length: bool = False):
+def to_model_cache(past_key_values):
     """Wrap legacy tuples for Transformers versions that require Cache objects."""
 
     if past_key_values is None:
@@ -130,25 +113,7 @@ def to_model_cache(past_key_values, use_max_seq_length: bool = False):
     try:
         from transformers.cache_utils import DynamicCache
 
-        cache = DynamicCache.from_legacy_cache(past_key_values)
-        if use_max_seq_length:
-            original_get_seq_length = cache.get_seq_length
-            original_get_mask_sizes = cache.get_mask_sizes
-
-            def get_seq_length_with_max(self, layer_idx: int = 0) -> int:
-                if layer_idx == 0 and getattr(self, "layers", None):
-                    return max(layer.get_seq_length() for layer in self.layers)
-                return original_get_seq_length(layer_idx)
-
-            def get_mask_sizes_with_max(self, cache_position: torch.Tensor, layer_idx: int) -> tuple[int, int]:
-                if layer_idx == 0 and getattr(self, "layers", None):
-                    query_length = cache_position.shape[0]
-                    return max(layer.get_seq_length() for layer in self.layers) + query_length, 0
-                return original_get_mask_sizes(cache_position, layer_idx)
-
-            cache.get_seq_length = MethodType(get_seq_length_with_max, cache)
-            cache.get_mask_sizes = MethodType(get_mask_sizes_with_max, cache)
-        return cache
+        return DynamicCache.from_legacy_cache(past_key_values)
     except Exception:
         return past_key_values
 
@@ -169,7 +134,7 @@ def summarize_attention_importance(attentions, layer_weighting: str = "uniform")
 
 
 def summarize_layer_attention_importance(attentions) -> Optional[list[torch.Tensor]]:
-    """Return one last-query attention vector per layer."""
+    """Return last-query attention summaries for each Transformer block."""
 
     if not attentions:
         return None
@@ -187,28 +152,6 @@ def summarize_layer_attention_importance(attentions) -> Optional[list[torch.Tens
 
 def _unique_sorted(indices: Iterable[int]) -> list[int]:
     return sorted(set(int(i) for i in indices))
-
-
-def layer_budget_for_method(config: CachePolicyConfig, layer_idx: int, num_layers: int) -> LayerBudget:
-    """Return the layer-wise budget used by Pyramid SinkKV variants."""
-
-    if num_layers <= 0:
-        raise ValueError("num_layers must be positive.")
-
-    group = min(2, (layer_idx * 3) // num_layers)
-    lower = LayerBudget(
-        window_size=max(1, round(config.window_size * 1.5)),
-        important_size=max(0, round(config.important_size * 1.5)),
-    )
-    middle = LayerBudget(window_size=config.window_size, important_size=config.important_size)
-    upper = LayerBudget(
-        window_size=max(1, round(config.window_size * 0.5)),
-        important_size=max(0, round(config.important_size * 0.5)),
-    )
-    budgets = [lower, middle, upper]
-    if config.method == "reverse_pyramid_sinkkv":
-        budgets = [upper, middle, lower]
-    return budgets[group]
 
 
 def select_sink_snapkv_indices(
@@ -317,31 +260,7 @@ def select_keep_indices(
     )
 
 
-def select_per_layer_keep_indices(
-    config: CachePolicyConfig,
-    cache_lengths: list[int],
-    layer_importance: list[torch.Tensor],
-) -> list[list[int]]:
-    """Select cache slots independently for each layer."""
-
-    keep_indices = []
-    num_layers = len(cache_lengths)
-    for layer_idx, cache_length in enumerate(cache_lengths):
-        budget = layer_budget_for_method(config, layer_idx, num_layers)
-        importance = layer_importance[layer_idx]
-        keep_indices.append(
-            select_sink_snapkv_indices(
-                cache_length=cache_length,
-                sink_size=config.sink_size,
-                window_size=budget.window_size,
-                important_size=budget.important_size,
-                importance=importance,
-            )
-        )
-    return keep_indices
-
-
-def prune_legacy_cache(past_key_values, keep_indices: list[int] | list[list[int]]):
+def prune_legacy_cache(past_key_values, keep_indices: list[int]):
     """Prune tuple-based KV cache tensors along the sequence dimension."""
 
     past_key_values = as_legacy_cache(past_key_values)
@@ -350,14 +269,12 @@ def prune_legacy_cache(past_key_values, keep_indices: list[int] | list[list[int]
     if not keep_indices:
         return past_key_values
 
-    per_layer = keep_indices and isinstance(keep_indices[0], list)
     pruned = []
-    for layer_idx, (key, value) in enumerate(past_key_values):
-        layer_indices = keep_indices[layer_idx] if per_layer else keep_indices
-        if not layer_indices:
+    for key, value in past_key_values:
+        if not keep_indices:
             pruned.append((key[:, :, :0, :], value[:, :, :0, :]))
             continue
-        index = torch.tensor(layer_indices, device=key.device, dtype=torch.long)
+        index = torch.tensor(keep_indices, device=key.device, dtype=torch.long)
         pruned.append((key.index_select(2, index), value.index_select(2, index)))
     return tuple(pruned)
 
@@ -372,7 +289,6 @@ class KVCacheRuntime:
     def reset(self) -> None:
         self.past_key_values = None
         self.cache_positions: list[int] = []
-        self.layer_cache_positions: list[list[int]] = []
         self.importance_scores: Optional[torch.Tensor] = None
         self.total_seen = 0
         self.retained_history: list[float] = []
@@ -390,10 +306,7 @@ class KVCacheRuntime:
             "output_attentions": self.config.needs_attention,
             "return_dict": True,
         }
-        if self.config.is_per_layer:
-            kwargs["cache_position"] = torch.tensor([position_value], dtype=torch.long, device=device)
-        else:
-            kwargs["attention_mask"] = torch.ones((1, cache_len + 1), dtype=torch.long, device=device)
+        kwargs["attention_mask"] = torch.ones((1, cache_len + 1), dtype=torch.long, device=device)
         return kwargs
 
     def step(self, model, input_ids: torch.Tensor) -> torch.Tensor:
@@ -406,10 +319,7 @@ class KVCacheRuntime:
         if input_ids.ndim != 2 or input_ids.shape[1] != 1:
             raise ValueError("KVCacheRuntime.step expects input_ids with shape [batch=1, seq=1].")
 
-        cache_len = len(self.cache_positions)
-        if self.config.is_per_layer and self.layer_cache_positions:
-            cache_len = max(len(positions) for positions in self.layer_cache_positions)
-        kwargs = self._build_model_kwargs(input_ids, cache_len)
+        kwargs = self._build_model_kwargs(input_ids, len(self.cache_positions))
 
         with torch.inference_mode():
             if _supports_return_legacy_cache():
@@ -418,10 +328,7 @@ class KVCacheRuntime:
                 outputs = model(**kwargs)
 
         full_cache = as_legacy_cache(outputs.past_key_values)
-        if self.config.is_per_layer:
-            self._update_per_layer_cache(full_cache, outputs.attentions)
-        else:
-            self._update_shared_cache(full_cache, outputs.attentions)
+        self._update_shared_cache(full_cache, outputs.attentions)
 
         self.total_seen += 1
         return outputs.logits
@@ -465,45 +372,12 @@ class KVCacheRuntime:
         pruned_cache = prune_legacy_cache(full_cache, keep_indices)
         self.past_key_values = to_model_cache(pruned_cache)
         self.cache_positions = [new_positions[idx] for idx in keep_indices]
-        self.layer_cache_positions = []
         if self.config.method in {"h2o", "scissorhands"} and state_importance is not None:
             index = torch.tensor(keep_indices, device=state_importance.device, dtype=torch.long)
             self.importance_scores = state_importance.index_select(0, index).detach()
         else:
             self.importance_scores = None
         self._record_retained([len(self.cache_positions)])
-
-    def _update_per_layer_cache(self, full_cache, attentions) -> None:
-        layer_importance = summarize_layer_attention_importance(attentions)
-        if layer_importance is None:
-            raise RuntimeError(
-                f"{self.config.method} requires per-layer attention weights, but the model did not return them. "
-                "Load the model with attn_implementation='eager'."
-            )
-
-        num_layers = len(full_cache)
-        if not self.layer_cache_positions:
-            self.layer_cache_positions = [[] for _ in range(num_layers)]
-        new_layer_positions = [[*positions, self.total_seen] for positions in self.layer_cache_positions]
-        cache_lengths = [len(positions) for positions in new_layer_positions]
-        if len(layer_importance) != num_layers:
-            raise RuntimeError(f"Expected {num_layers} attention layers, received {len(layer_importance)}.")
-        for layer_idx, (scores, cache_length) in enumerate(zip(layer_importance, cache_lengths)):
-            if scores.numel() != cache_length:
-                raise RuntimeError(
-                    f"Layer {layer_idx} expected {cache_length} attention scores, received {scores.numel()}."
-                )
-
-        per_layer_keep_indices = select_per_layer_keep_indices(self.config, cache_lengths, layer_importance)
-        pruned_cache = prune_legacy_cache(full_cache, per_layer_keep_indices)
-        self.past_key_values = to_model_cache(pruned_cache, use_max_seq_length=True)
-        self.layer_cache_positions = [
-            [positions[idx] for idx in keep_indices]
-            for positions, keep_indices in zip(new_layer_positions, per_layer_keep_indices)
-        ]
-        self.cache_positions = self.layer_cache_positions[0] if self.layer_cache_positions else []
-        self.importance_scores = None
-        self._record_retained([len(positions) for positions in self.layer_cache_positions])
 
     def _record_retained(self, layer_lengths: list[int]) -> None:
         if not layer_lengths:
