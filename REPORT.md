@@ -1,4 +1,4 @@
-# Short Report: ASW-KV for Training-Free Inference Acceleration
+# Short Report: Layer-Adaptive Pyramid SinkKV
 
 ## Goal
 
@@ -6,170 +6,80 @@ This project studies training-free KV cache compression for
 `EleutherAI/pythia-70m`. The goal is to reduce retained KV cache tokens while
 preserving language modeling quality and measuring inference latency.
 
-## Compared methods
+## Method
 
-- `dense`: full KV cache, used as the quality baseline.
-- `sliding_window`: keeps only recent tokens.
-- `streamingllm`: keeps attention sink tokens plus recent tokens.
-- `lm_infinite`: implemented as initial tokens plus recent tokens. It matches
-  the StreamingLLM layout in this lightweight framework, so it is treated as an
-  alias rather than an independent benchmark row.
-- `h2o`: keeps cumulative attention heavy hitters plus recent tokens.
-- `scissorhands`: keeps tokens with persistent high attention plus recent
-  tokens.
-- `tova`: keeps the current token and `important_size` highest-attended
-  historical tokens.
-- `snapkv`: keeps current-attention-selected middle tokens plus recent tokens.
-- `pyramidkv`: keeps sink, recent, and layer-weighted attention-selected
-  middle tokens.
-- `asw_kv`: keeps attention sink tokens, attention-selected middle tokens, and
-  recent tokens.
+The proposed method is `pyramid_sinkkv`, a layer-adaptive extension of the
+uniform `sink_snapkv` baseline.
 
-## Proposed extension
-
-ASW-KV extends StreamingLLM with a small attention-guided middle memory. At each
-decoding step, it computes the average attention paid by the current token to
-retained historical tokens. The middle-context tokens with the highest attention
-scores are kept together with sink and recent tokens.
-
-This gives the cache layout:
+Uniform `sink_snapkv` keeps the same cache layout in every layer:
 
 ```text
-[sink tokens] + [important middle tokens] + [recent window]
+[sink tokens] + [attention-selected middle tokens] + [recent window]
 ```
 
-The method does not train or modify model parameters.
+`pyramid_sinkkv` keeps the same three token types, but assigns different budgets
+to different layers. For the 6-layer Pythia-70M model, the default profile is:
 
-## Experimental setup
+| Layers | Window | Important |
+| --- | ---: | ---: |
+| 0-1 | 384 | 48 |
+| 2-3 | 256 | 32 |
+| 4-5 | 128 | 16 |
 
-- Model: `EleutherAI/pythia-70m`
-- Datasets: Wikitext-2 and PG-19 single long sample
-- Sequence length: 1024 tokens for PPL experiments
-- PPL device/precision: CPU, float32
-- Latency device/precision: NVIDIA GeForce RTX 4080 Laptop GPU, float16
-- Cache parameters:
-  - `sink_size`: 4
-  - `window_size`: 256
-  - `important_size`: 32
+With `sink_size=4`, the average nominal budget is 292 tokens per layer, equal
+to the uniform `sink_snapkv` budget. The method is training-free and does not
+modify model parameters.
 
-## Perplexity results
+## Compared Methods
 
-| Dataset | Method | PPL | Max KV tokens | Avg KV tokens |
-| --- | --- | ---: | ---: | ---: |
-| Wikitext-2 | dense | 30.15 | 1023 | 512.00 |
-| Wikitext-2 | sliding_window | 42.95 | 256 | 224.09 |
-| Wikitext-2 | streamingllm | 36.19 | 260 | 227.09 |
-| Wikitext-2 | h2o | 35.51 | 288 | 247.60 |
-| Wikitext-2 | scissorhands | 36.44 | 288 | 247.60 |
-| Wikitext-2 | tova | 65.50 | 33 | 32.48 |
-| Wikitext-2 | snapkv | 36.16 | 288 | 247.60 |
-| Wikitext-2 | pyramidkv | 35.58 | 292 | 250.47 |
-| Wikitext-2 | asw_kv | 35.68 | 292 | 250.47 |
-| PG-19 | dense | 31.10 | 1023 | 512.00 |
-| PG-19 | sliding_window | 36.30 | 256 | 224.09 |
-| PG-19 | streamingllm | 31.43 | 260 | 227.09 |
-| PG-19 | h2o | 31.39 | 288 | 247.60 |
-| PG-19 | scissorhands | 31.43 | 288 | 247.60 |
-| PG-19 | tova | 44.91 | 33 | 32.48 |
-| PG-19 | snapkv | 31.23 | 288 | 247.60 |
-| PG-19 | pyramidkv | 31.30 | 292 | 250.47 |
-| PG-19 | asw_kv | 31.23 | 292 | 250.47 |
+- `dense`: full KV cache.
+- `streamingllm`: sink tokens plus recent window.
+- `sink_snapkv`: uniform sink + selected middle + recent window.
+- `pyramid_sinkkv`: proposed layer-adaptive SinkKV.
+- `reverse_pyramid_sinkkv`: ablation with the layer allocation reversed.
 
-## Latency results
+## Experiments
 
-Latency was measured with a 512-token PG-19 prompt and 64 generated tokens on
-the GPU after an unmeasured CUDA warmup. The implementation uses a clear
-one-token-at-a-time Python decoding loop, so these numbers should be read as a
-reproducible policy comparison rather than an optimized serving benchmark.
+The intended Linux-server experiment suite is:
 
-| Method | TTFT (s) | TPOT (ms) | Throughput (tok/s) | Peak memory (MB) |
-| --- | ---: | ---: | ---: | ---: |
-| dense | 4.17 | 10.62 | 13.23 | 165.62 |
-| sliding_window | 5.12 | 9.64 | 11.18 | 154.42 |
-| streamingllm | 4.66 | 8.76 | 12.29 | 154.56 |
-| h2o | 5.27 | 10.42 | 10.80 | 155.58 |
-| scissorhands | 5.13 | 10.50 | 11.05 | 155.58 |
-| tova | 5.19 | 9.79 | 11.03 | 146.58 |
-| snapkv | 5.00 | 11.27 | 11.20 | 155.57 |
-| pyramidkv | 4.94 | 12.36 | 11.20 | 155.71 |
-| asw_kv | 6.78 | 9.78 | 8.65 | 155.71 |
+- Wikitext-2 PPL with 1024 tokens.
+- PG-19 single-sample PPL with 1024 tokens.
+- PG-19 latency with a 512-token prompt and 64 generated tokens.
+- Layer-allocation ablation:
+  `sink_snapkv` vs. `pyramid_sinkkv` vs. `reverse_pyramid_sinkkv`.
+- Budget sweep:
+  `sink_snapkv` vs. `pyramid_sinkkv` under several average budgets.
 
-## Discussion
+Run all experiments with:
 
-Attention sink tokens improve strongly over a pure sliding window. On PG-19,
-PPL drops from 36.30 with `sliding_window` to 31.43 with `streamingllm`, nearly
-recovering the dense-cache result of 31.10. On Wikitext-2, `streamingllm` also
-improves over `sliding_window`, reducing PPL from 42.95 to 36.19.
+```bash
+bash scripts/run_server_experiments.sh
+```
 
-The additional reproduced methods give useful reference points. H2O-lite uses
-cumulative attention scores and is strongest on Wikitext-2, reducing PPL from
-36.19 with `streamingllm` to 35.51. SnapKV-lite uses the current query's
-attention scores and is strongest on the tested PG-19 sample, reaching 31.23
-PPL with a 288-token nominal budget. PyramidKV-lite, implemented with
-layer-weighted attention aggregation under a shared cache layout, is also
-competitive: 31.30 PPL on PG-19 and 35.58 on Wikitext-2.
+Summarize existing results with:
 
-Not every method improves every dataset. TOVA-lite is the most aggressive
-compressed policy in this benchmark, with a nominal budget of only
-`important_size + 1 = 33` tokens. It therefore saves the most cache memory, but
-its PPL is much worse: 44.91 on PG-19 and 65.50 on Wikitext-2. This likely
-happens because TOVA-lite does not reserve a full recent window; it keeps the
-newest token and the highest-attended historical tokens, so low-attention but
-locally useful tokens can be dropped. Scissorhands-lite is also weaker than H2O
-here, suggesting that running-maximum attention is less stable than cumulative
-attention for these short 1024-token tests.
+```bash
+bash scripts/summarize_server_results.sh results/server
+```
 
-ASW-KV improves the PPL/cache-size trade-off compared with StreamingLLM in both
-1024-token experiments. On PG-19, ASW-KV reduces PPL from 31.43 to 31.23 while
-still keeping the maximum retained cache far below dense cache size
-(292 vs. 1023 tokens). On Wikitext-2, ASW-KV reduces PPL from 36.19 to 35.68.
-Compared with SnapKV-lite, ASW-KV adds four attention sink tokens; compared
-with H2O-lite, it uses instant attention rather than cumulative attention.
+The generated summary is saved to `results/server/summary.md`.
 
-InfLLM and TreeKV are not included in the unified table because they require a
-block-retrieval or tree-structured cache design that is outside this simple
-one-token-at-a-time retention framework. They are better evaluated with a
-separate implementation rather than forced into the same per-token selection
-API.
+## Expected Evidence
 
-ASW-KV uses attention scores, so its quality gain should be weighed against the
-cost of requesting attention weights. The current implementation favors clarity
-and reproducibility; an optimized version could update importance scores less
-frequently or reuse cached importance statistics.
+The main claim should be evaluated in one of two ways:
 
-On the GPU latency smoke benchmark, compressed-cache methods reduce peak memory
-relative to dense cache. The warmup removes the largest cold-start bias, but
-the latency script is intentionally simple, so absolute timings can still vary
-between runs. The clearest latency-side conclusion is memory: TOVA-lite reaches
-the lowest peak memory because it keeps only 33 tokens, while the other
-compressed methods also retain fewer KV tokens and lower peak CUDA memory than
-dense cache.
+- At similar average KV budget, `pyramid_sinkkv` should improve PPL over
+  `sink_snapkv`.
+- At similar PPL, `pyramid_sinkkv` should use fewer average retained KV tokens.
 
-## Ablation: middle-token memory size
-
-This ablation fixes PG-19, 1024 tokens, `sink_size=4`, and `window_size=256`,
-then varies the ASW-KV middle-token budget.
-
-| important_size | PPL | Max KV tokens | Avg KV tokens |
-| ---: | ---: | ---: | ---: |
-| 0 | 31.43 | 260 | 227.09 |
-| 16 | 31.39 | 276 | 238.90 |
-| 32 | 31.23 | 292 | 250.47 |
-| 64 | 31.15 | 324 | 272.85 |
-
-Increasing the attention-selected middle-token budget monotonically reduces PPL
-in this setting. This supports the main ASW-KV hypothesis: under a fixed
-sink-plus-window cache structure, retaining a small number of attention-relevant
-middle-context tokens can recover additional language modeling quality.
+The reverse allocation ablation is important. If `reverse_pyramid_sinkkv` is
+worse than `pyramid_sinkkv`, it supports the claim that the low-to-high pyramid
+allocation is not arbitrary.
 
 ## Limitations
 
-- The implementation is optimized for clarity and reproducibility, not custom
-  CUDA kernels.
-- Latency on short contexts can be dominated by Python overhead.
-- ASW-KV attention-score collection may reduce speed unless optimized or updated
-  less frequently.
-
-## How to reproduce
-
-See `README.md` for exact commands.
+- Pythia-70M has only 6 layers, so layer-wise effects may be weaker than on
+  larger models.
+- The implementation is designed for reproducibility, not optimized serving.
+- Per-layer pruning requires attention weights and Python-side cache indexing,
+  which can add overhead.

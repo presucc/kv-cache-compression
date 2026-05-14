@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
+from types import MethodType
 from typing import Iterable, Optional
 
 import torch
@@ -16,8 +18,54 @@ SUPPORTED_METHODS = {
     "tova",
     "snapkv",
     "pyramidkv",
-    "asw_kv",
+    "sink_snapkv",
+    "pyramid_sinkkv",
+    "reverse_pyramid_sinkkv",
 }
+
+ATTENTION_METHODS = {
+    "h2o",
+    "scissorhands",
+    "tova",
+    "snapkv",
+    "pyramidkv",
+    "sink_snapkv",
+    "pyramid_sinkkv",
+    "reverse_pyramid_sinkkv",
+}
+
+PER_LAYER_METHODS = {"pyramid_sinkkv", "reverse_pyramid_sinkkv"}
+
+
+def _transformers_version_tuple() -> tuple[int, int]:
+    try:
+        import transformers
+
+        parts = transformers.__version__.split(".")
+        return int(parts[0]), int(parts[1])
+    except Exception:
+        return 999, 999
+
+
+def _use_local_position_ids_for_compressed_cache() -> bool:
+    override = os.getenv("KV_POSITION_IDS", "").strip().lower()
+    if override in {"local", "compressed"}:
+        return True
+    if override in {"absolute", "global"}:
+        return False
+    # Older GPT-NeoX implementations build rotary tables from the compressed
+    # cache length, so absolute positions can index past the table after
+    # pruning. Newer Transformers versions handle absolute cache positions.
+    return _transformers_version_tuple() < (4, 45)
+
+
+def _supports_return_legacy_cache() -> bool:
+    override = os.getenv("KV_RETURN_LEGACY_CACHE", "").strip().lower()
+    if override in {"0", "false", "no"}:
+        return False
+    if override in {"1", "true", "yes"}:
+        return True
+    return _transformers_version_tuple() >= (4, 45)
 
 
 @dataclass(frozen=True)
@@ -37,7 +85,11 @@ class CachePolicyConfig:
 
     @property
     def needs_attention(self) -> bool:
-        return self.method in {"h2o", "scissorhands", "tova", "snapkv", "pyramidkv", "asw_kv"}
+        return self.method in ATTENTION_METHODS
+
+    @property
+    def is_per_layer(self) -> bool:
+        return self.method in PER_LAYER_METHODS
 
     @property
     def nominal_budget(self) -> Optional[int]:
@@ -54,6 +106,12 @@ class CachePolicyConfig:
         return self.sink_size + self.important_size + self.window_size
 
 
+@dataclass(frozen=True)
+class LayerBudget:
+    window_size: int
+    important_size: int
+
+
 def as_legacy_cache(past_key_values):
     """Return a tuple-based cache when Transformers returns a Cache object."""
 
@@ -64,7 +122,7 @@ def as_legacy_cache(past_key_values):
     return past_key_values
 
 
-def to_model_cache(past_key_values):
+def to_model_cache(past_key_values, use_max_seq_length: bool = False):
     """Wrap legacy tuples for Transformers versions that require Cache objects."""
 
     if past_key_values is None:
@@ -72,16 +130,46 @@ def to_model_cache(past_key_values):
     try:
         from transformers.cache_utils import DynamicCache
 
-        return DynamicCache.from_legacy_cache(past_key_values)
+        cache = DynamicCache.from_legacy_cache(past_key_values)
+        if use_max_seq_length:
+            original_get_seq_length = cache.get_seq_length
+            original_get_mask_sizes = cache.get_mask_sizes
+
+            def get_seq_length_with_max(self, layer_idx: int = 0) -> int:
+                if layer_idx == 0 and getattr(self, "layers", None):
+                    return max(layer.get_seq_length() for layer in self.layers)
+                return original_get_seq_length(layer_idx)
+
+            def get_mask_sizes_with_max(self, cache_position: torch.Tensor, layer_idx: int) -> tuple[int, int]:
+                if layer_idx == 0 and getattr(self, "layers", None):
+                    query_length = cache_position.shape[0]
+                    return max(layer.get_seq_length() for layer in self.layers) + query_length, 0
+                return original_get_mask_sizes(cache_position, layer_idx)
+
+            cache.get_seq_length = MethodType(get_seq_length_with_max, cache)
+            cache.get_mask_sizes = MethodType(get_mask_sizes_with_max, cache)
+        return cache
     except Exception:
         return past_key_values
 
 
 def summarize_attention_importance(attentions, layer_weighting: str = "uniform") -> Optional[torch.Tensor]:
-    """Average last-query attention over layers and heads.
+    """Average last-query attention over layers and heads."""
 
-    Returns a vector with one score for every slot in the current retained cache.
-    """
+    layer_vectors = summarize_layer_attention_importance(attentions)
+    if not layer_vectors:
+        return None
+
+    stacked = torch.stack(layer_vectors, dim=0)
+    if layer_weighting == "pyramid":
+        weights = torch.linspace(1.0, 2.0, stacked.shape[0], device=stacked.device, dtype=stacked.dtype)
+        weights = weights / weights.sum()
+        return (stacked * weights[:, None]).sum(dim=0)
+    return stacked.mean(dim=0)
+
+
+def summarize_layer_attention_importance(attentions) -> Optional[list[torch.Tensor]]:
+    """Return one last-query attention vector per layer."""
 
     if not attentions:
         return None
@@ -94,19 +182,72 @@ def summarize_attention_importance(attentions, layer_weighting: str = "uniform")
         last_query = layer_attention.detach().float()[:, :, -1, :]
         vectors.append(last_query.mean(dim=(0, 1)))
 
-    if not vectors:
-        return None
-
-    stacked = torch.stack(vectors, dim=0)
-    if layer_weighting == "pyramid":
-        weights = torch.linspace(1.0, 2.0, stacked.shape[0], device=stacked.device, dtype=stacked.dtype)
-        weights = weights / weights.sum()
-        return (stacked * weights[:, None]).sum(dim=0)
-    return stacked.mean(dim=0)
+    return vectors or None
 
 
 def _unique_sorted(indices: Iterable[int]) -> list[int]:
     return sorted(set(int(i) for i in indices))
+
+
+def layer_budget_for_method(config: CachePolicyConfig, layer_idx: int, num_layers: int) -> LayerBudget:
+    """Return the layer-wise budget used by Pyramid SinkKV variants."""
+
+    if num_layers <= 0:
+        raise ValueError("num_layers must be positive.")
+
+    group = min(2, (layer_idx * 3) // num_layers)
+    lower = LayerBudget(
+        window_size=max(1, round(config.window_size * 1.5)),
+        important_size=max(0, round(config.important_size * 1.5)),
+    )
+    middle = LayerBudget(window_size=config.window_size, important_size=config.important_size)
+    upper = LayerBudget(
+        window_size=max(1, round(config.window_size * 0.5)),
+        important_size=max(0, round(config.important_size * 0.5)),
+    )
+    budgets = [lower, middle, upper]
+    if config.method == "reverse_pyramid_sinkkv":
+        budgets = [upper, middle, lower]
+    return budgets[group]
+
+
+def select_sink_snapkv_indices(
+    cache_length: int,
+    sink_size: int,
+    window_size: int,
+    important_size: int,
+    importance: Optional[torch.Tensor] = None,
+) -> list[int]:
+    """Keep sink tokens, attention-selected middle tokens, and recent tokens."""
+
+    length = cache_length
+    if length == 0:
+        return []
+
+    budget = sink_size + window_size + important_size
+    if length <= budget:
+        return list(range(length))
+
+    sink_end = min(sink_size, length)
+    recent_start = max(sink_end, length - window_size)
+    sink = range(0, sink_end)
+    recent = range(recent_start, length)
+    protected = set(sink) | set(recent)
+    middle = [idx for idx in range(length) if idx not in protected]
+
+    if not middle or important_size == 0:
+        return _unique_sorted(protected)
+
+    keep_count = min(important_size, len(middle))
+    if importance is not None and importance.numel() == length:
+        middle_tensor = torch.tensor(middle, device=importance.device)
+        middle_scores = importance.index_select(0, middle_tensor)
+        top_local = torch.topk(middle_scores, k=keep_count).indices
+        important = middle_tensor.index_select(0, top_local).detach().cpu().tolist()
+    else:
+        important = middle[-keep_count:]
+
+    return _unique_sorted([*protected, *important])
 
 
 def select_keep_indices(
@@ -154,39 +295,69 @@ def select_keep_indices(
     if config.method in {"h2o", "scissorhands", "snapkv"}:
         recent_start = max(0, length - config.window_size)
         protected = set(range(recent_start, length))
-    else:
-        protected = set(sink) | set(recent)
+        middle = [idx for idx in range(length) if idx not in protected]
+        if not middle or config.important_size == 0:
+            return _unique_sorted(protected)
+        keep_count = min(config.important_size, len(middle))
+        if importance is not None and importance.numel() == length:
+            middle_tensor = torch.tensor(middle, device=importance.device)
+            middle_scores = importance.index_select(0, middle_tensor)
+            top_local = torch.topk(middle_scores, k=keep_count).indices
+            important = middle_tensor.index_select(0, top_local).detach().cpu().tolist()
+        else:
+            important = middle[-keep_count:]
+        return _unique_sorted([*protected, *important])
 
-    middle = [idx for idx in range(length) if idx not in protected]
-    if not middle or config.important_size == 0:
-        return _unique_sorted([*protected])
-
-    keep_count = min(config.important_size, len(middle))
-    if importance is not None and importance.numel() == length:
-        middle_tensor = torch.tensor(middle, device=importance.device)
-        middle_scores = importance.index_select(0, middle_tensor)
-        top_local = torch.topk(middle_scores, k=keep_count).indices
-        important = middle_tensor.index_select(0, top_local).detach().cpu().tolist()
-    else:
-        # Fallback keeps the most recent middle tokens if attention weights are
-        # unavailable for a model/version.
-        important = middle[-keep_count:]
-
-    return _unique_sorted([*protected, *important])
+    return select_sink_snapkv_indices(
+        cache_length=length,
+        sink_size=config.sink_size,
+        window_size=config.window_size,
+        important_size=config.important_size,
+        importance=importance,
+    )
 
 
-def prune_legacy_cache(past_key_values, keep_indices: list[int]):
+def select_per_layer_keep_indices(
+    config: CachePolicyConfig,
+    cache_lengths: list[int],
+    layer_importance: list[torch.Tensor],
+) -> list[list[int]]:
+    """Select cache slots independently for each layer."""
+
+    keep_indices = []
+    num_layers = len(cache_lengths)
+    for layer_idx, cache_length in enumerate(cache_lengths):
+        budget = layer_budget_for_method(config, layer_idx, num_layers)
+        importance = layer_importance[layer_idx]
+        keep_indices.append(
+            select_sink_snapkv_indices(
+                cache_length=cache_length,
+                sink_size=config.sink_size,
+                window_size=budget.window_size,
+                important_size=budget.important_size,
+                importance=importance,
+            )
+        )
+    return keep_indices
+
+
+def prune_legacy_cache(past_key_values, keep_indices: list[int] | list[list[int]]):
     """Prune tuple-based KV cache tensors along the sequence dimension."""
 
     past_key_values = as_legacy_cache(past_key_values)
     if past_key_values is None:
         return None
     if not keep_indices:
-        return tuple((key[:, :, :0, :], value[:, :, :0, :]) for key, value in past_key_values)
+        return past_key_values
 
+    per_layer = keep_indices and isinstance(keep_indices[0], list)
     pruned = []
-    for key, value in past_key_values:
-        index = torch.tensor(keep_indices, device=key.device, dtype=torch.long)
+    for layer_idx, (key, value) in enumerate(past_key_values):
+        layer_indices = keep_indices[layer_idx] if per_layer else keep_indices
+        if not layer_indices:
+            pruned.append((key[:, :, :0, :], value[:, :, :0, :]))
+            continue
+        index = torch.tensor(layer_indices, device=key.device, dtype=torch.long)
         pruned.append((key.index_select(2, index), value.index_select(2, index)))
     return tuple(pruned)
 
@@ -201,10 +372,29 @@ class KVCacheRuntime:
     def reset(self) -> None:
         self.past_key_values = None
         self.cache_positions: list[int] = []
+        self.layer_cache_positions: list[list[int]] = []
         self.importance_scores: Optional[torch.Tensor] = None
         self.total_seen = 0
-        self.retained_history: list[int] = []
+        self.retained_history: list[float] = []
         self.max_retained_tokens = 0
+
+    def _build_model_kwargs(self, input_ids: torch.Tensor, cache_len: int) -> dict:
+        device = input_ids.device
+        position_value = cache_len if _use_local_position_ids_for_compressed_cache() else self.total_seen
+        position_ids = torch.tensor([[position_value]], dtype=torch.long, device=device)
+        kwargs = {
+            "input_ids": input_ids,
+            "position_ids": position_ids,
+            "past_key_values": self.past_key_values,
+            "use_cache": True,
+            "output_attentions": self.config.needs_attention,
+            "return_dict": True,
+        }
+        if self.config.is_per_layer:
+            kwargs["cache_position"] = torch.tensor([position_value], dtype=torch.long, device=device)
+        else:
+            kwargs["attention_mask"] = torch.ones((1, cache_len + 1), dtype=torch.long, device=device)
+        return kwargs
 
     def step(self, model, input_ids: torch.Tensor) -> torch.Tensor:
         """Run one token and update the compressed KV cache.
@@ -216,32 +406,31 @@ class KVCacheRuntime:
         if input_ids.ndim != 2 or input_ids.shape[1] != 1:
             raise ValueError("KVCacheRuntime.step expects input_ids with shape [batch=1, seq=1].")
 
-        device = input_ids.device
         cache_len = len(self.cache_positions)
-        attention_mask = torch.ones((1, cache_len + 1), dtype=torch.long, device=device)
-        position_ids = torch.tensor([[self.total_seen]], dtype=torch.long, device=device)
-
-        kwargs = {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "position_ids": position_ids,
-            "past_key_values": self.past_key_values,
-            "use_cache": True,
-            "output_attentions": self.config.needs_attention,
-            "return_dict": True,
-        }
+        if self.config.is_per_layer and self.layer_cache_positions:
+            cache_len = max(len(positions) for positions in self.layer_cache_positions)
+        kwargs = self._build_model_kwargs(input_ids, cache_len)
 
         with torch.inference_mode():
-            try:
+            if _supports_return_legacy_cache():
                 outputs = model(**kwargs, return_legacy_cache=True)
-            except TypeError:
+            else:
                 outputs = model(**kwargs)
 
         full_cache = as_legacy_cache(outputs.past_key_values)
+        if self.config.is_per_layer:
+            self._update_per_layer_cache(full_cache, outputs.attentions)
+        else:
+            self._update_shared_cache(full_cache, outputs.attentions)
+
+        self.total_seen += 1
+        return outputs.logits
+
+    def _update_shared_cache(self, full_cache, attentions) -> None:
         new_positions = [*self.cache_positions, self.total_seen]
         layer_weighting = "pyramid" if self.config.method == "pyramidkv" else "uniform"
         importance = (
-            summarize_attention_importance(outputs.attentions, layer_weighting=layer_weighting)
+            summarize_attention_importance(attentions, layer_weighting=layer_weighting)
             if self.config.needs_attention
             else None
         )
@@ -253,43 +442,78 @@ class KVCacheRuntime:
 
         selection_importance = importance
         state_importance = None
+        cache_len = len(self.cache_positions)
         if self.config.method in {"h2o", "scissorhands"}:
-            if importance is not None and importance.numel() == len(new_positions):
-                previous = self.importance_scores
-                if previous is None or previous.numel() != cache_len:
-                    previous = torch.zeros(cache_len, dtype=importance.dtype, device=importance.device)
-                else:
-                    previous = previous.to(device=importance.device, dtype=importance.dtype)
-                expanded_previous = torch.cat(
-                    [previous, torch.zeros(1, dtype=importance.dtype, device=importance.device)]
-                )
-                if self.config.method == "h2o":
-                    state_importance = expanded_previous + importance
-                else:
-                    state_importance = torch.maximum(expanded_previous, importance)
-                selection_importance = state_importance
-            else:
+            if importance is None or importance.numel() != len(new_positions):
                 raise RuntimeError(
                     f"{self.config.method} expected {len(new_positions)} attention scores, "
                     f"but received {0 if importance is None else importance.numel()}."
                 )
+            previous = self.importance_scores
+            if previous is None or previous.numel() != cache_len:
+                previous = torch.zeros(cache_len, dtype=importance.dtype, device=importance.device)
+            else:
+                previous = previous.to(device=importance.device, dtype=importance.dtype)
+            expanded_previous = torch.cat([previous, torch.zeros(1, dtype=importance.dtype, device=importance.device)])
+            if self.config.method == "h2o":
+                state_importance = expanded_previous + importance
+            else:
+                state_importance = torch.maximum(expanded_previous, importance)
+            selection_importance = state_importance
 
         keep_indices = select_keep_indices(self.config, len(new_positions), selection_importance)
-
         pruned_cache = prune_legacy_cache(full_cache, keep_indices)
         self.past_key_values = to_model_cache(pruned_cache)
         self.cache_positions = [new_positions[idx] for idx in keep_indices]
+        self.layer_cache_positions = []
         if self.config.method in {"h2o", "scissorhands"} and state_importance is not None:
             index = torch.tensor(keep_indices, device=state_importance.device, dtype=torch.long)
             self.importance_scores = state_importance.index_select(0, index).detach()
         else:
             self.importance_scores = None
-        self.total_seen += 1
+        self._record_retained([len(self.cache_positions)])
 
-        retained = len(self.cache_positions)
+    def _update_per_layer_cache(self, full_cache, attentions) -> None:
+        layer_importance = summarize_layer_attention_importance(attentions)
+        if layer_importance is None:
+            raise RuntimeError(
+                f"{self.config.method} requires per-layer attention weights, but the model did not return them. "
+                "Load the model with attn_implementation='eager'."
+            )
+
+        num_layers = len(full_cache)
+        if not self.layer_cache_positions:
+            self.layer_cache_positions = [[] for _ in range(num_layers)]
+        new_layer_positions = [[*positions, self.total_seen] for positions in self.layer_cache_positions]
+        cache_lengths = [len(positions) for positions in new_layer_positions]
+        if len(layer_importance) != num_layers:
+            raise RuntimeError(f"Expected {num_layers} attention layers, received {len(layer_importance)}.")
+        for layer_idx, (scores, cache_length) in enumerate(zip(layer_importance, cache_lengths)):
+            if scores.numel() != cache_length:
+                raise RuntimeError(
+                    f"Layer {layer_idx} expected {cache_length} attention scores, received {scores.numel()}."
+                )
+
+        per_layer_keep_indices = select_per_layer_keep_indices(self.config, cache_lengths, layer_importance)
+        pruned_cache = prune_legacy_cache(full_cache, per_layer_keep_indices)
+        self.past_key_values = to_model_cache(pruned_cache, use_max_seq_length=True)
+        self.layer_cache_positions = [
+            [positions[idx] for idx in keep_indices]
+            for positions, keep_indices in zip(new_layer_positions, per_layer_keep_indices)
+        ]
+        self.cache_positions = self.layer_cache_positions[0] if self.layer_cache_positions else []
+        self.importance_scores = None
+        self._record_retained([len(positions) for positions in self.layer_cache_positions])
+
+    def _record_retained(self, layer_lengths: list[int]) -> None:
+        if not layer_lengths:
+            retained = 0.0
+            max_retained = 0
+        else:
+            retained = float(sum(layer_lengths) / len(layer_lengths))
+            max_retained = max(layer_lengths)
         self.retained_history.append(retained)
-        self.max_retained_tokens = max(self.max_retained_tokens, retained)
-        return outputs.logits
+        self.max_retained_tokens = max(self.max_retained_tokens, max_retained)
 
     @property
     def average_retained_tokens(self) -> float:

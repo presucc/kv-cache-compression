@@ -7,9 +7,12 @@ __pycache__/
 build/
 dist/
 *.egg-info/
+results/*.json
 results/*.jsonl
 results/*.csv
 results/*.txt
+results/server/
+results/local/
 !results/.gitkeep
 data/*.txt
 data/pg19_raw/
@@ -18,3 +21,9 @@ hf_cache/
 downloads/
 wandb/
 .DS_Store
+*.aux
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.xdv

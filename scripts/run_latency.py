@@ -15,10 +15,12 @@ METHOD_CHOICES = [
     "tova",
     "snapkv",
     "pyramidkv",
-    "asw_kv",
+    "sink_snapkv",
+    "pyramid_sinkkv",
+    "reverse_pyramid_sinkkv",
 ]
 
-DEFAULT_METHODS = [method for method in METHOD_CHOICES if method != "lm_infinite"]
+DEFAULT_METHODS = ["dense", "streamingllm", "sink_snapkv", "pyramid_sinkkv"]
 
 
 def parse_args() -> argparse.Namespace:

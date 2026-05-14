@@ -1,0 +1,374 @@
+\documentclass{article}
+
+\usepackage[preprint]{neurips_2025}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{amsfonts}
+\usepackage{microtype}
+
+\setlength{\tabcolsep}{4pt}
+\renewcommand{\arraystretch}{0.92}
+\setlength{\textfloatsep}{7pt}
+\setlength{\floatsep}{6pt}
+\setlength{\intextsep}{6pt}
+
+\title{Layer-Adaptive Pyramid SinkKV for Training-Free KV Cache Compression}
+
+\author{
+Lixiang Wang\\
+\texttt{cort\_lee@sjtu.edu.cn}
+\And
+Rui Cai\\
+\texttt{cai\_rui@sjtu.edu.cn}
+\And
+Haotian Wu\\
+\texttt{wuhaotian@sjtu.edu.cn}
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Long-context decoding with Transformer language models is increasingly limited by
+the memory footprint and attention cost of the key-value (KV) cache. This report
+studies training-free KV cache compression for efficient inference under the
+course constraint that model parameters remain unchanged. Building on attention
+sinks, attention-selected middle tokens, and recent-window retention, we propose
+\textbf{Layer-Adaptive Pyramid SinkKV}, a layer-wise cache pruning policy that
+allocates larger budgets to lower layers and smaller budgets to higher layers.
+The method keeps the same average nominal budget as a uniform Sink-SnapKV
+baseline while changing where the retained cache is placed across depth. On
+Pythia-70M, Pyramid SinkKV improves Wikitext-2 perplexity from 35.68 to 35.05
+relative to the uniform baseline with a slightly smaller measured average KV
+cache, but it is slightly worse on the tested PG-19 sample, increasing
+perplexity from 31.23 to 31.46. A reverse-pyramid ablation is worse on both
+datasets, suggesting that layer direction matters. These results do not show a
+universal win, but they provide evidence that layer-wise budget allocation is a
+relevant design factor for training-free KV cache compression.
+\end{abstract}
+
+\section{Introduction}
+\label{sec:intro}
+
+Autoregressive language model inference stores a KV cache for all previously
+processed tokens. The cache avoids recomputing past keys and values, but its
+sequence length grows with the context and directly affects GPU memory usage and
+the attention work performed during decoding. For long prompts and streaming
+generation, a dense cache can become a practical bottleneck even when the model
+itself is small enough to fit in memory. The assignment therefore asks for
+training-free inference optimization on Pythia-70M, with quality and efficiency
+measured on datasets such as Wikitext-2 and PG-19.
+
+The project implementation is available at
+\url{https://github.com/presucc/kv-cache-compression}. It reproduces several
+cache retention policies and implements the proposed Pyramid SinkKV variant.
+The individual results show the central trade-off: aggressive pruning
+can reduce retained tokens or improve time per output token, but it can also
+discard context that is important for perplexity. This motivates evaluating not
+only how many tokens are compressed, but also how the retained budget is
+structured. A cache policy should specify which tokens are retained, why the
+retained budget is allocated that way, and where the quality loss comes from.
+
+We focus on the layer allocation problem. Existing simple baselines often apply
+the same KV budget to every Transformer layer. However, different layers can
+play different roles: lower layers are closer to lexical and local-context
+features, while higher layers tend to aggregate information into more compact
+representations. This motivates a pyramid allocation that keeps more recent and
+selected historical tokens in lower layers and prunes more aggressively in upper
+layers. The resulting method, Layer-Adaptive Pyramid SinkKV, is still
+training-free and does not modify model weights.
+
+Our contributions are threefold. First, we formulate a compact layer-adaptive
+extension of Sink-SnapKV that combines sink tokens, attention-selected middle
+tokens, and a recent window under a pyramid budget. Second, we evaluate dense
+attention, StreamingLLM, uniform Sink-SnapKV, Pyramid SinkKV, and a
+reverse-pyramid ablation under the same Pythia-70M pipeline. Third, we report a
+mixed empirical finding: pyramid allocation improves Wikitext-2 quality and
+beats the reverse ablation, while PG-19 exposes that a fixed pyramid is not
+always better than a uniform middle-context budget.
+
+\section{Related Work}
+\label{sec:related-work}
+
+\paragraph{StreamingLLM.}
+Long-context generation is bottlenecked by the growth of the KV cache: every
+decoded token appends new key and value states, so memory and attention cost
+increase with the effective context length. A direct way to control this cost is
+a sliding-window cache that keeps only the most recent tokens. However,
+StreamingLLM observes that pure window attention can fail once early
+``attention sink'' tokens are evicted, because many language models assign
+disproportionate attention mass to a small set of initial positions even when
+their semantic content is not directly relevant \citep{xiao2023streamingllm}.
+StreamingLLM therefore keeps a small number of sink tokens together with a recent
+window. This design does not explicitly preserve semantically important
+middle-context tokens.
+
+\paragraph{SnapKV.}
+SnapKV addresses this limitation by using attention information from the prompt
+to predict which historical KV entries will be useful during subsequent
+generation \citep{li2024snapkv}. It uses an observation window near the end of
+the prompt, aggregates attention weights over earlier positions, smooths the
+importance scores, and retains the top-scoring KV positions for each head. This
+design is content-adaptive and training-free, but obtaining and processing
+attention scores can reduce realized speedup, especially on small models or
+short prompts where KV attention is not the dominant cost.
+
+\paragraph{PyramidKV.}
+PyramidKV argues that KV compression should not use a uniform budget across
+layers \citep{cai2024pyramidkv}. Its key observation is pyramidal information
+funneling: lower layers distribute attention more broadly across the context,
+while higher layers aggregate information toward fewer critical positions. A
+layer-wise compression policy can therefore allocate larger budgets to lower
+layers and smaller budgets to higher layers. Our method adapts this idea to a
+small course-project setting by combining it with sink tokens, a recent window,
+and attention-selected middle-context tokens.
+
+These three lines are complementary: StreamingLLM contributes robust sink
+tokens, SnapKV contributes content-aware selection, and PyramidKV contributes
+layer-wise budgeting. Pyramid SinkKV combines these ideas while keeping the
+inference-only nature of the baselines.
+
+\section{Methodology}
+\label{sec:methodology}
+
+We introduce \textbf{Layer-Adaptive Pyramid SinkKV}, a training-free KV cache
+compression method for decoder-only language models. The method preserves the
+same three cache components as the uniform Sink-SnapKV baseline: initial sink
+tokens, a recent local window, and attention-selected middle-context tokens. Its
+main change is that the sizes of the recent and selected components depend on
+the Transformer layer.
+
+For layer $\ell$, the retained cache positions are
+\[
+K_\ell = S \cup R_\ell \cup I_\ell ,
+\]
+where $S$ is the shared set of sink tokens, $R_\ell$ is the layer-specific recent
+window, and $I_\ell$ contains important middle tokens selected from attention
+scores. The model weights are unchanged, so the method only modifies
+inference-time cache pruning. In the implementation, cache pruning is performed
+after decoding steps using a separate index set for each layer. When attention
+scores are unavailable, the selected-token component degenerates to a recent
+fallback; the reported attention-based experiments therefore use eager attention
+so that token importance can be computed explicitly.
+
+For the 6-layer Pythia-70M model, the budget profile is fixed before inference:
+layers 0--1 keep $(4,384,48)$ sink, window, and selected tokens; layers 2--3 keep
+$(4,256,32)$; and layers 4--5 keep $(4,128,16)$. The average nominal budget is
+292 tokens per layer, exactly matching the uniform Sink-SnapKV baseline
+$(4+256+32=292)$. Thus the comparison tests the effect of budget redistribution,
+not a larger total cache. We also evaluate \texttt{reverse\_pyramid}, which
+swaps the low-layer and high-layer budgets, to test whether the allocation
+direction matters.
+
+Within each layer, sink tokens stabilize attention, recent tokens preserve local
+coherence, and selected middle tokens retain non-local evidence. After these
+sets are merged, the KV tensors of that layer are indexed by the corresponding
+keep positions. We use a fixed schedule rather than a dynamic controller so that
+the experiment isolates the effect of layer-wise allocation.
+
+\section{Experiments}
+\label{sec:experiments}
+
+\paragraph{Setup.}
+We evaluate \texttt{EleutherAI/pythia-70m} on Wikitext-2 validation text and one
+long PG-19 test sample. PPL is measured with 1024 evaluation tokens. The PPL
+runs use CUDA with \texttt{float32}; generation latency uses CUDA with
+\texttt{float16}, a 512-token prompt, and 64 generated tokens. We report PPL,
+maximum retained KV tokens, average retained KV tokens, time to first token
+(TTFT), time per output token (TPOT), throughput, and peak CUDA memory. The
+average retained KV count is averaged across decoding steps and, for
+layer-adaptive methods, across layers. This is why Pyramid SinkKV can have a
+higher maximum retained token count than uniform Sink-SnapKV while still using a
+slightly smaller measured average cache.
+
+All compared methods use the same tokenizer, checkpoint, input text, and
+evaluation loop. The preliminary reproduction and final experiments are not
+treated as one shared benchmark because their sequence lengths and latency
+scripts differ; the reproduction is included only as motivation for moving
+beyond direct uniform compression.
+
+\paragraph{Preliminary baseline reproduction.}
+Before implementing the final layer-adaptive method, the project reproduced a
+SnapKV-style baseline on Pythia-70M without changing model weights. These runs
+used 2048-token PPL sequences, where the first half built and compressed the KV
+cache and the second half was evaluated autoregressively. Generation used a
+1024-token prompt and 128 generated tokens on an NVIDIA GeForce RTX 4080 Laptop
+GPU. The reproduced SnapKV setting used \texttt{max\_capacity=768},
+\texttt{observation\_window=64}, and \texttt{kernel\_size=5}.
+
+\begin{table}[t]
+  \centering
+  \scriptsize
+  \caption{Preliminary SnapKV reproduction motivating the final design. KV memory
+  is reported in MB, TTFT in seconds, and TPOT in milliseconds.}
+  \label{tab:baseline-repro}
+  \setlength{\tabcolsep}{3.3pt}
+  \begin{tabular}{llrrrrr}
+    \toprule
+    Setting & Method & PPL & KV (MB) & TTFT (s) & TPOT (ms) & Tok/s \\
+    \midrule
+    Wiki PPL & Dense & 39.67 & 12.00 & -- & -- & -- \\
+    Wiki PPL & SnapKV & 59.00 & 9.75 & -- & -- & -- \\
+    PG PPL & Dense & 28.21 & 12.00 & -- & -- & -- \\
+    PG PPL & SnapKV & 44.97 & 9.75 & -- & -- & -- \\
+    Generation & Dense & -- & -- & 22.76 & 4.94 & 202.53 \\
+    Generation & SnapKV & -- & -- & 21.95 & 4.71 & 212.18 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Table~\ref{tab:baseline-repro} shows the original quality--efficiency trade-off.
+SnapKV reduced KV memory from 12.00 MB to 9.75 MB and improved TPOT from 4.94 ms
+to 4.71 ms, while PPL increased on both datasets. This diagnostic
+result motivated a method that keeps the same three-part cache structure while
+testing whether layer-wise budget redistribution can improve the
+quality--compression frontier.
+
+\paragraph{Main results and analysis.}
+
+\begin{table}[t]
+  \centering
+  \small
+  \caption{Main PPL results. Max and Avg denote retained KV tokens.}
+  \label{tab:main}
+  \begin{tabular}{llrrr}
+    \toprule
+    Data & Method & PPL & Max & Avg \\
+    \midrule
+    PG-19 & dense & 31.10 & 1023 & 512.00 \\
+    PG-19 & streamingllm & 31.43 & 260 & 227.09 \\
+    PG-19 & sink\_snapkv & 31.23 & 292 & 250.47 \\
+    PG-19 & pyramid\_sinkkv & 31.46 & 436 & 243.71 \\
+    \midrule
+    WikiText & dense & 30.15 & 1023 & 512.00 \\
+    WikiText & streamingllm & 36.19 & 260 & 227.09 \\
+    WikiText & sink\_snapkv & 35.68 & 292 & 250.47 \\
+    WikiText & pyramid\_sinkkv & 35.05 & 436 & 243.71 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Table~\ref{tab:main} reports the main comparison. On Wikitext-2, Pyramid SinkKV
+improves over uniform Sink-SnapKV, reducing PPL from 35.68 to 35.05 while
+retaining a slightly smaller average number of KV tokens. On PG-19, however, it
+is slightly worse than uniform Sink-SnapKV, increasing PPL from 31.23 to 31.46.
+These results indicate that redistributing the same average budget across layers
+can affect the quality--compression trade-off, although the optimal allocation
+depends on the dataset and context distribution. PG-19 contains long-form book
+text, where preserving a stable uniform middle-context budget may be more
+important, whereas Wikitext-2 appears to benefit from allocating additional
+capacity to lower layers.
+
+The Wikitext-2 result provides the main positive evidence: Pyramid SinkKV keeps
+the same nominal budget as uniform Sink-SnapKV but improves PPL. The PG-19 result
+suggests that long-form book text may require a more stable middle-context
+budget across layers. Thus a single fixed pyramid schedule is not optimal for
+every domain.
+
+\begin{table}[t]
+  \centering
+  \small
+  \caption{Layer-allocation ablation.}
+  \label{tab:ablation}
+  \begin{tabular}{lrrrr}
+    \toprule
+    Method & PG PPL & Wiki PPL & Max & Avg \\
+    \midrule
+    sink\_snapkv & 31.23 & 35.68 & 292 & 250.47 \\
+    pyramid\_sinkkv & 31.46 & 35.05 & 436 & 243.71 \\
+    reverse\_pyramid & 31.51 & 35.14 & 436 & 243.71 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Table~\ref{tab:ablation} tests whether the pyramid direction matters. The
+reverse-pyramid ablation has worse PPL than Pyramid SinkKV on both datasets,
+suggesting that giving larger budgets to lower layers is not arbitrary. The
+margin is modest, which is consistent with the limited depth of the 6-layer
+Pythia-70M model, but the ordering remains consistent.
+
+\begin{table}[t]
+  \centering
+  \small
+  \caption{PG-19 generation latency with a 512-token prompt and 64 generated
+  tokens. TTFT and TPOT are reported in seconds; memory is MB.}
+  \label{tab:latency}
+  \begin{tabular}{lrrrr}
+    \toprule
+    Method & TTFT & TPOT & Tok/s & Mem. \\
+    \midrule
+    dense & 3.85 & 0.0080 & 14.69 & 165.62 \\
+    streamingllm & 4.01 & 0.0088 & 14.02 & 154.56 \\
+    sink\_snapkv & 4.75 & 0.0092 & 12.01 & 155.71 \\
+    pyramid\_sinkkv & 3.81 & 0.0082 & 14.79 & 224.83 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Table~\ref{tab:latency} reports the latency side. Pyramid SinkKV has comparable
+speed and lower measured average KV tokens than uniform Sink-SnapKV, but higher
+peak memory. This is likely an implementation artifact of per-layer pruning and
+attention bookkeeping rather than an inherent property of the cache policy. The
+latency script uses a clear one-token-at-a-time Python loop, so these numbers
+should be read as reproducible policy comparisons, not optimized serving
+benchmarks.
+
+Overall, the empirical evidence supports a narrower claim than universal
+dominance over uniform cache policies: layer-wise cache budgeting is a relevant
+design factor. The method improves Wikitext-2 quality at the same nominal budget
+and consistently outperforms the reverse allocation, while PG-19 shows that the
+best budget profile may depend on long-document structure. A natural next step
+is to tune the pyramid profile, reduce attention bookkeeping, and evaluate
+whether the same pattern becomes stronger on deeper models.
+
+\begin{thebibliography}{9}
+
+\bibitem[Xiao et~al.(2023)Xiao, Tian, Chen, Han, and Lewis]{xiao2023streamingllm}
+Guangxuan Xiao, Yuandong Tian, Beidi Chen, Song Han, and Mike Lewis.
+\newblock Efficient streaming language models with attention sinks.
+\newblock \emph{arXiv preprint arXiv:2309.17453}, 2023.
+\newblock URL: \url{https://arxiv.org/abs/2309.17453}.
+
+\bibitem[Li et~al.(2024)Li, Huang, Yang, Venkitesh, Locatelli, Ye, Cai, Lewis, and Chen]{li2024snapkv}
+Yuhong Li, Yingbing Huang, Bowen Yang, Bharat Venkitesh, Acyr Locatelli,
+Hanchen Ye, Tianle Cai, Patrick Lewis, and Deming Chen.
+\newblock SnapKV: LLM knows what you are looking for before generation.
+\newblock \emph{arXiv preprint arXiv:2404.14469}, 2024.
+\newblock URL: \url{https://arxiv.org/abs/2404.14469}.
+
+\bibitem[Cai et~al.(2024)Cai, Zhang, Gao, Liu, Li, Liu, Lu, Xiong, Dong, Hu, and Xiao]{cai2024pyramidkv}
+Zefan Cai, Yichi Zhang, Bofei Gao, Yuliang Liu, Yucheng Li, Tianyu Liu, Keming
+Lu, Wayne Xiong, Yue Dong, Junjie Hu, and Wen Xiao.
+\newblock PyramidKV: Dynamic KV cache compression based on pyramidal
+information funneling.
+\newblock \emph{arXiv preprint arXiv:2406.02069}, 2024.
+\newblock URL: \url{https://arxiv.org/abs/2406.02069}.
+
+\end{thebibliography}
+
+\appendix
+
+\section{Work Division and Code Repositories}
+\label{app:work-division}
+
+\paragraph{Group work division.}
+Lixiang Wang was responsible for the initial idea proposal, the overall paper
+structure, and the Introduction. Rui Cai was responsible for the concrete
+experiments and the experimental section. Haotian Wu was responsible for idea
+refinement, related-literature search, and the Related Work section.
+
+\paragraph{Individual homework repositories.}
+The individual code repositories used for the personal part of the assignment
+are listed below:
+\begin{itemize}
+  \item \url{https://github.com/wuhaotian0508/nlp-homework}
+  \item \url{https://github.com/presucc/kv-cache-compression}
+  \item \url{https://github.com/sjtu-Cort-Lee/NLP-HW-Personal-Part}
+\end{itemize}
+
+\end{document}

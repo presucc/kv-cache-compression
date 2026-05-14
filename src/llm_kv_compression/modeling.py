@@ -43,7 +43,7 @@ def load_model_and_tokenizer(model_name: str, device: str = "auto", dtype: str =
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    kwargs = {"dtype": torch_dtype}
+    kwargs = {"torch_dtype": torch_dtype}
     try:
         model = AutoModelForCausalLM.from_pretrained(
             model_name,
