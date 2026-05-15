@@ -42,6 +42,21 @@ Summarize existing results with:
 bash scripts/summarize_server_results.sh results/server
 ```
 
+## Results
+
+Detailed baseline result tables are saved in
+`results/baseline_summary.md`.
+
+| Dataset | dense | streamingllm | snapkv | pyramidkv | sink_snapkv |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| PG-19 PPL | 31.10 | 31.43 | 31.23 | 31.30 | 31.23 |
+| Wikitext-2 PPL | 30.15 | 36.19 | 36.16 | 35.58 | 35.68 |
+
+For PG-19 latency with a 512-token prompt and 64 generated tokens,
+`streamingllm` reduces peak CUDA memory from 165.62 MB to 154.56 MB, while
+`sink_snapkv` retains a larger selected-token budget and obtains 155.71 MB peak
+memory in this run.
+
 ## Notes
 
 This repository is intentionally scoped to baseline reproduction and shared

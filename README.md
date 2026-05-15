@@ -126,6 +126,26 @@ Summarize existing results:
 bash scripts/summarize_server_results.sh results/server
 ```
 
+## Baseline Results
+
+The local baseline tables are included in
+[results/baseline_summary.md](results/baseline_summary.md).
+
+Main 1024-token PPL results:
+
+| Dataset | dense | streamingllm | snapkv | pyramidkv | sink_snapkv |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| PG-19 | 31.10 | 31.43 | 31.23 | 31.30 | 31.23 |
+| Wikitext-2 | 30.15 | 36.19 | 36.16 | 35.58 | 35.68 |
+
+PG-19 latency with a 512-token prompt and 64 generated tokens:
+
+| Method | TTFT (s) | TPOT (s) | Throughput (tok/s) | Peak CUDA Memory (MB) |
+| --- | ---: | ---: | ---: | ---: |
+| dense | 3.85 | 0.0080 | 14.69 | 165.62 |
+| streamingllm | 4.01 | 0.0088 | 14.02 | 154.56 |
+| sink_snapkv | 4.75 | 0.0092 | 12.01 | 155.71 |
+
 ## Repository Structure
 
 ```text

@@ -39,6 +39,19 @@ bash scripts/run_server_experiments.sh
 bash scripts/summarize_server_results.sh results/server
 ```
 
+## 实验结果
+
+完整表格保存在 `results/baseline_summary.md`。
+
+| 数据集 | dense | streamingllm | snapkv | pyramidkv | sink_snapkv |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| PG-19 PPL | 31.10 | 31.43 | 31.23 | 31.30 | 31.23 |
+| Wikitext-2 PPL | 30.15 | 36.19 | 36.16 | 35.58 | 35.68 |
+
+PG-19 latency 使用 512-token prompt 和 64 个生成 token。该实验中，
+`streamingllm` 的 peak CUDA memory 为 154.56 MB，`sink_snapkv` 为
+155.71 MB，均低于 dense 的 165.62 MB。
+
 ## 说明
 
 本仓库聚焦个人部分的基线复现和评测工具。
